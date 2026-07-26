@@ -23,9 +23,13 @@ const NAV_ITEMS: NavItem[] = [
 export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [toggleHovered, setToggleHovered] = useState(false);
 
   useEffect(() => {
-    if (localStorage.getItem(STORAGE_KEY) === "true") setCollapsed(true);
+    if (localStorage.getItem(STORAGE_KEY) !== "true") return;
+
+    const frame = requestAnimationFrame(() => setCollapsed(true));
+    return () => cancelAnimationFrame(frame);
   }, []);
 
   const toggle = () => {
@@ -79,10 +83,15 @@ export default function Sidebar() {
       <button
         type="button"
         onClick={toggle}
-        style={s.edgeToggle}
+        onMouseEnter={() => setToggleHovered(true)}
+        onMouseLeave={() => setToggleHovered(false)}
+        style={{
+          ...s.edgeToggle,
+          ...(toggleHovered ? s.edgeToggleHover : null),
+        }}
         aria-label={collapsed ? "Expandir sidebar" : "Colapsar sidebar"}
       >
-        <ChevronIcon collapsed={collapsed} />
+        <ChevronIcon collapsed={collapsed} color={toggleHovered ? PAPER : INK} />
       </button>
     </aside>
   );
@@ -112,7 +121,6 @@ function NavLink({
         ...(active ? s.navItemActive : hover ? s.navItemHover : null),
       }}
     >
-      {active && <span style={s.activeBar} />}
       <Icon active={active} />
       <FadeText collapsed={collapsed}>
         <span style={s.navLabel}>{item.label}</span>
@@ -182,7 +190,7 @@ function RecordingsIcon({ active }: { active: boolean }) {
   );
 }
 
-function ChevronIcon({ collapsed }: { collapsed: boolean }) {
+function ChevronIcon({ collapsed, color }: { collapsed: boolean; color: string }) {
   return (
     <svg
       width="12"
@@ -193,7 +201,7 @@ function ChevronIcon({ collapsed }: { collapsed: boolean }) {
     >
       <path
         d="M15 5l-7 7 7 7"
-        stroke={INK}
+        stroke={color}
         strokeWidth="3"
         strokeLinecap="square"
         strokeLinejoin="miter"
@@ -212,7 +220,8 @@ const s: Record<string, CSSProperties> = {
     flexDirection: "column",
     background: PAPER,
     color: INK,
-    borderRight: `3px solid ${INK}`,
+    borderRight: "1px solid rgba(17,17,17,0.16)",
+    boxShadow: "6px 0 18px rgba(17,17,17,0.025)",
     fontFamily: "'Helvetica Neue', Arial, sans-serif",
     transition: "width 0.2s ease",
   },
@@ -282,10 +291,11 @@ const s: Record<string, CSSProperties> = {
     gap: 12,
     padding: "10px 12px",
     borderRadius: 10,
+    border: "2px solid transparent",
     color: INK,
     textDecoration: "none",
     boxSizing: "border-box",
-    transition: "background-color 0.15s ease",
+    transition: "background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease",
   },
   navItemCollapsed: {
     justifyContent: "center",
@@ -295,16 +305,10 @@ const s: Record<string, CSSProperties> = {
     background: "rgba(17,17,17,0.05)",
   },
   navItemActive: {
-    background: "rgba(0,224,168,0.18)",
-  },
-  activeBar: {
-    position: "absolute",
-    left: 2,
-    top: 8,
-    bottom: 8,
-    width: 3,
-    borderRadius: 2,
     background: ACCENT,
+    border: `2px solid ${INK}`,
+    borderRadius: 8,
+    boxShadow: `2px 2px 0 ${INK}`,
   },
   navLabel: {
     fontFamily: MONO,
@@ -353,9 +357,16 @@ const s: Record<string, CSSProperties> = {
     justifyContent: "center",
     background: PAPER,
     border: `2px solid ${INK}`,
+    borderRadius: "50%",
     boxShadow: `2px 2px 0 ${INK}`,
     cursor: "pointer",
     padding: 0,
     zIndex: 5,
+    transition: "background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease",
+  },
+  edgeToggleHover: {
+    background: INK,
+    boxShadow: `3px 3px 0 ${INK}`,
+    transform: "translate(-1px, -1px)",
   },
 };

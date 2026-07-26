@@ -230,22 +230,38 @@ function MeasurementButton({
   disabled: boolean;
   onToggle: () => void;
 }) {
+  const [hovered, setHovered] = useState(false);
+  const interactiveHover = hovered && !disabled;
+
   return (
     <button
       onClick={onToggle}
       disabled={disabled}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         ...styles.measureButton,
+        background: interactiveHover ? PAPER : INK,
+        color: interactiveHover ? INK : PAPER,
         opacity: disabled ? 0.4 : 1,
         cursor: disabled ? "not-allowed" : "pointer",
+        boxShadow: interactiveHover
+          ? `5px 5px 0 ${INK}`
+          : `4px 4px 0 ${INK}`,
+        transform: interactiveHover ? "translate(-1px, -1px)" : "none",
       }}
     >
       {measuring ? (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={PAPER}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill={interactiveHover ? INK : PAPER}>
           <rect x="5" y="5" width="14" height="14" />
         </svg>
       ) : (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={PAPER}>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill={interactiveHover ? INK : PAPER}
+        >
           <polygon points="6,4 20,12 6,20" />
         </svg>
       )}
@@ -337,6 +353,8 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 700,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
+    transition:
+      "background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease",
   },
   header: {
     borderBottom: `2px solid ${INK}`,
