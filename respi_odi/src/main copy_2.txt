@@ -1,0 +1,37 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+const char* ssid     = "MIWIFI_g4hr 2G";
+const char* password = "GNjkqFXs";
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.print("\nConectado. IP local: ");
+  Serial.println(WiFi.localIP());
+
+  HTTPClient http;
+  http.begin("http://api.ipify.org");
+  int code = http.GET();
+
+  if (code == 200) {
+    Serial.print("Respuesta: ");
+    Serial.println(http.getString());   // {"ip":"x.x.x.x"}
+  } else {
+    Serial.printf("Error HTTP: %d\n", code);
+  }
+  http.end();
+}
+
+void loop() {
+
+
+
+}
