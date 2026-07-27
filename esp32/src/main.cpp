@@ -22,7 +22,7 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
   if (type == WStype_DISCONNECTED) Serial.println("WS desconectado");
 
   if (type == WStype_TEXT) {
-    Serial.printf("WS recibido: %s\n", (char*)payload);   // <-- imprime lo que llega
+    Serial.printf("WS recibido: %s\t", (char*)payload);   // <-- imprime lo que llega
 
     if (strstr((char*)payload, "start")) {
       measuring = true;
