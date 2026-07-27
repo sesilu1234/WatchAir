@@ -7,3 +7,13 @@
 servidor aal iniciar siempre verifique si quedaa muerto aalguna recording con time:ended NULL (es malo porque el usuario no podria iniciar nnueva grabacion)
 
 pensar escenaario sy hacer pruebas
+
+- miraa cachos poroblemas pueden ocurrir que dejen inutilizable el sensor :
+
+INFO: 139.47.103.9:58725 - "POST /sensor/stop HTTP/1.1" 409 Conflict
+
+Diagnosed conflict state and prescribed prerequisite action
+Diagnosed conflict state and prescribed prerequisite action
+Eso es la guarda funcionando como debe: has intentado parar el sensor mientras hay una grabación en curso, y el servidor lo bloquea para que no cortes la grabación sin querer.
+
+Comprueba el estado:

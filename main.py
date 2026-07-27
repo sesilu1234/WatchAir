@@ -5,18 +5,11 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("watchair")
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 RECORDINGS_DIR = Path("recordings")
 RECORDINGS_DIR.mkdir(exist_ok=True)
@@ -189,13 +182,13 @@ async def sensor(ws: WebSocket):
     try:
         while True:
             message = await ws.receive_text()
-            log.info("ESP32: %s", message)
             await manager.broadcast_frontends(message)  # live siempre
             recorder.write(message)                     # a fichero solo si grabando
     except WebSocketDisconnect:
         pass
     finally:
         manager.disconnect_sensor(ws)
+
 
 # ===================================================
 # WS Frontend: solo escucha, conectarse = recibir

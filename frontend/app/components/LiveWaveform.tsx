@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
+import { WS_FRONTEND_URL, startSensor, stopSensor } from "../lib/api";
 
-const WEBSOCKET_URL = "ws://13.48.132.12:8000/frontend"; // debe apuntar al mismo host que usa el ESP32
 const MAX_POINTS = 200;
 
 // Vista en vivo de la señal del ESP32: conexión WS, gráfica y control start/stop.
@@ -22,10 +22,11 @@ export default function LiveWaveform({
     temperature: 0,
   });
   const [measuring, setMeasuring] = useState(false);
+  const [pending, setPending] = useState(false);
 
-  // --- Conexión WebSocket ---
+  // --- Conexión WebSocket: solo recibe (datos + estado), nunca envía comandos ---
   useEffect(() => {
-    const ws = new WebSocket(WEBSOCKET_URL);
+    const ws = new WebSocket(WS_FRONTEND_URL);
     wsRef.current = ws;
     ws.onopen = () => setStatus("connected");
     ws.onclose = () => setStatus("disconnected");
@@ -51,12 +52,18 @@ export default function LiveWaveform({
     return () => ws.close();
   }, []);
 
-  // --- Comando al ESP32: el servidor ws reenvía { cmd } al firmware ---
+  // --- Comando al ESP32: POST al backend, que reenvía la orden por su WS ---
   // No cambia measuring aquí: se espera la confirmación real ({"state": ...}) del ESP32.
-  const toggleMeasurement = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ cmd: measuring ? "stop" : "start" }));
+  const toggleMeasurement = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await (measuring ? stopSensor() : startSensor());
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPending(false);
+    }
   };
 
   // --- Dibujo: solo el área bajo la curva, sin marcas ---
@@ -145,7 +152,7 @@ export default function LiveWaveform({
         {!hideMeasurementButton && (
           <MeasurementButton
             measuring={measuring}
-            disabled={status !== "connected"}
+            disabled={status !== "connected" || pending}
             onToggle={toggleMeasurement}
           />
         )}

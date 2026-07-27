@@ -1,57 +1,66 @@
 "use client";
 import Link from "next/link";
-import { use, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { use, useEffect, useRef, useState, type CSSProperties } from "react";
 import LiveWaveform from "../../components/LiveWaveform";
 import { ACCENT, INK, MONO, PAPER } from "../../theme";
-import {
-  finishActiveRecording,
-  formatClock,
-  formatDuration,
-  formatRelativeDate,
-  formatTime,
-  getActiveRecordingServerSnapshot,
-  getActiveRecordingSnapshot,
-  getRecordingsServerSnapshot,
-  getRecordingsSnapshot,
-  loadActiveRecording,
-  loadRecordings,
-  saveRecordings,
-  subscribeActiveRecording,
-  subscribeRecordings,
-} from "../mockData";
-
-const WEBSOCKET_URL = "ws://13.48.132.12:8000/frontend";
+import { getHealth, listRecordings, stopRecording, WS_FRONTEND_URL, type RecordingFile } from "../../lib/api";
+import { formatBytes, formatClock, formatRelativeDate, formatTime, parseRecordingDate } from "../../lib/format";
 
 export default function RecordingDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const { id } = use(params);
-  const active = useSyncExternalStore(
-    subscribeActiveRecording,
-    getActiveRecordingSnapshot,
-    getActiveRecordingServerSnapshot,
-  );
+  const { id: rawId } = use(params);
+  const id = decodeURIComponent(rawId);
 
-  if (active?.id === id) {
-    return <LiveRecordingView id={id} startedAt={active.startedAt} />;
+  // undefined = todavía no lo sabemos (comprobando /  al backend)
+  const [isLive, setIsLive] = useState<boolean | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    getHealth()
+      .then((h) => {
+        if (!cancelled) setIsLive(h.recording && h.recording_file === id);
+      })
+      .catch(() => {
+        if (!cancelled) setIsLive(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  if (isLive === undefined) {
+    return (
+      <main style={styles.main}>
+        <BackLink />
+        <div style={styles.notFound}>
+          <p style={styles.notFoundText}>Comprobando estado…</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (isLive) {
+    return <LiveRecordingView id={id} />;
   }
 
   return <HistoricalRecordingView id={id} />;
 }
 
-// --- Vista en vivo: se llega aquí mientras esta grabación (su uuid) está en curso ---
-function LiveRecordingView({ id, startedAt }: { id: string; startedAt: number }) {
+// --- Vista en vivo: se llega aquí mientras esta grabación (su fichero) está en curso ---
+function LiveRecordingView({ id }: { id: string }) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsStatus, setWsStatus] = useState("connecting");
-  const [elapsedSeconds, setElapsedSeconds] = useState(() =>
-    Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
-  );
+  const [pending, setPending] = useState(false);
+  const [startedAt] = useState(() => Date.now()); // el server no guarda la hora de inicio
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [finished, setFinished] = useState(false);
 
-  // --- Conexión WebSocket: solo para detectar el fin de la grabación y enviar "stop" ---
+  // --- Conexión WebSocket: solo para detectar el fin de la grabación ---
   useEffect(() => {
-    const ws = new WebSocket(WEBSOCKET_URL);
+    const ws = new WebSocket(WS_FRONTEND_URL);
     wsRef.current = ws;
     ws.onopen = () => setWsStatus("connected");
     ws.onclose = () => setWsStatus("disconnected");
@@ -59,15 +68,11 @@ function LiveRecordingView({ id, startedAt }: { id: string; startedAt: number })
     ws.onmessage = (ev) => {
       try {
         const d = JSON.parse(ev.data);
-        if (typeof d.state !== "string") return;
-        if (d.state !== "measuring") {
-          const active = loadActiveRecording();
-          if (active && active.id === id) finishActiveRecording(active);
-        }
+        if (typeof d.rec === "boolean" && !d.rec) setFinished(true);
       } catch {}
     };
     return () => ws.close();
-  }, [id]);
+  }, []);
 
   // --- Cronómetro ---
   useEffect(() => {
@@ -77,11 +82,21 @@ function LiveRecordingView({ id, startedAt }: { id: string; startedAt: number })
     return () => clearInterval(timer);
   }, [startedAt]);
 
-  const handleStop = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ cmd: "stop" }));
+  const handleStop = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await stopRecording();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPending(false);
+    }
   };
+
+  if (finished) {
+    return <HistoricalRecordingView id={id} />;
+  }
 
   return (
     <main style={styles.main}>
@@ -100,7 +115,7 @@ function LiveRecordingView({ id, startedAt }: { id: string; startedAt: number })
       <div style={styles.liveBar}>
         <div style={styles.liveBarStat}>
           <div style={styles.summaryLabel}>Empezó a las</div>
-          <div style={styles.summaryValue}>{formatTime(new Date(startedAt).toISOString())}</div>
+          <div style={styles.summaryValue}>{formatTime(new Date(startedAt))}</div>
         </div>
         <div style={styles.liveBarStat}>
           <div style={styles.summaryLabel}>Duración</div>
@@ -108,8 +123,8 @@ function LiveRecordingView({ id, startedAt }: { id: string; startedAt: number })
         </div>
         <button
           onClick={handleStop}
-          disabled={wsStatus !== "connected"}
-          style={{ ...styles.stopButton, opacity: wsStatus !== "connected" ? 0.5 : 1 }}
+          disabled={wsStatus !== "connected" || pending}
+          style={{ ...styles.stopButton, opacity: wsStatus !== "connected" || pending ? 0.5 : 1 }}
         >
           <StopIcon />
           Stop Recording
@@ -136,19 +151,34 @@ function StopIcon() {
   );
 }
 
-// --- Vista de una grabación ya terminada (datos de ejemplo) ---
+// --- Vista de una grabación ya terminada: metadatos reales del backend ---
 function HistoricalRecordingView({ id }: { id: string }) {
-  const recordings = useSyncExternalStore(
-    subscribeRecordings,
-    getRecordingsSnapshot,
-    getRecordingsServerSnapshot,
-  );
-  const recording = recordings.find((r) => r.id === id);
+  const [recording, setRecording] = useState<RecordingFile | null | undefined>(undefined);
 
-  const handleDelete = () => {
-    const next = loadRecordings().filter((r) => r.id !== id);
-    saveRecordings(next);
-  };
+  useEffect(() => {
+    let cancelled = false;
+    listRecordings()
+      .then((list) => {
+        if (!cancelled) setRecording(list.find((r) => r.file === id) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setRecording(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  if (recording === undefined) {
+    return (
+      <main style={styles.main}>
+        <BackLink />
+        <div style={styles.notFound}>
+          <p style={styles.notFoundText}>Cargando…</p>
+        </div>
+      </main>
+    );
+  }
 
   if (!recording) {
     return (
@@ -164,34 +194,30 @@ function HistoricalRecordingView({ id }: { id: string }) {
     );
   }
 
+  const date = parseRecordingDate(recording.file);
+
   return (
     <main style={styles.main}>
       <BackLink />
       <header style={styles.header}>
-        <h1 style={styles.title}>{recording.name}</h1>
-        <p style={styles.subtitle}>
-          {formatRelativeDate(recording.date)} · {formatTime(recording.date)}
-        </p>
+        <h1 style={styles.title}>{recording.file}</h1>
+        <p style={styles.subtitle}>{date ? `${formatRelativeDate(date)} · ${formatTime(date)}` : "Fecha desconocida"}</p>
       </header>
 
       <section style={styles.card}>
         <div style={styles.summaryRow}>
-          <SummaryStat label="Fecha" value={new Date(recording.date).toLocaleDateString("es-ES")} />
-          <SummaryStat label="Hora de inicio" value={formatTime(recording.date)} />
-          <SummaryStat label="Duración" value={formatDuration(recording.durationSeconds)} />
+          <SummaryStat label="Fecha" value={date ? date.toLocaleDateString("es-ES") : "—"} />
+          <SummaryStat label="Hora de inicio" value={date ? formatTime(date) : "—"} />
+          <SummaryStat label="Tamaño" value={formatBytes(recording.size_bytes)} />
         </div>
 
         <div style={styles.placeholder}>
           <p style={styles.placeholderText}>
-            Los datos de la señal de esta sesión todavía no se guardan en el servidor.
-            Esta vista mostrará la gráfica completa en cuanto el backend persista las
-            grabaciones.
+            Los datos de la señal de esta sesión todavía no se pueden consultar desde la UI.
+            Esta vista mostrará la gráfica completa en cuanto el backend exponga el contenido
+            del fichero CSV.
           </p>
         </div>
-
-        <button onClick={handleDelete} style={styles.deleteButton}>
-          Eliminar grabación
-        </button>
       </section>
     </main>
   );
@@ -378,20 +404,6 @@ const styles: Record<string, CSSProperties> = {
     maxWidth: 420,
     lineHeight: 1.6,
     margin: 0,
-  },
-  deleteButton: {
-    alignSelf: "flex-start",
-    background: PAPER,
-    color: INK,
-    border: `2px solid ${INK}`,
-    boxShadow: `4px 4px 0 ${INK}`,
-    padding: "10px 18px",
-    fontFamily: MONO,
-    fontSize: 12,
-    fontWeight: 800,
-    textTransform: "uppercase",
-    letterSpacing: "0.05em",
-    cursor: "pointer",
   },
   notFound: {
     flex: 1,

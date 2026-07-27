@@ -1,42 +1,51 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
-  finishActiveRecording,
-  formatClock,
-  formatDuration,
-  formatRelativeDate,
-  formatTime,
-  getRecordingsServerSnapshot,
-  getRecordingsSnapshot,
-  loadActiveRecording,
-  newRecordingId,
-  saveActiveRecording,
-  subscribeRecordings,
-  type Recording,
-} from "./mockData";
-
-const WEBSOCKET_URL = "ws://13.48.132.12:8000/frontend";
+  getHealth,
+  listRecordings,
+  startRecording,
+  stopRecording,
+  WS_FRONTEND_URL,
+  type RecordingFile,
+} from "../lib/api";
+import { formatBytes, formatClock, formatRelativeDate, formatTime, parseRecordingDate } from "../lib/format";
 
 export default function RecordingsPage() {
   const wsRef = useRef<WebSocket | null>(null);
 
   const [wsStatus, setWsStatus] = useState("connecting");
   const [measuring, setMeasuring] = useState(false);
-  // Si ya hay una grabación en curso (p.ej. venimos de /recordings/<uuid>), recupera su id y hora de inicio.
-  const [startedAt, setStartedAt] = useState<number | null>(() => loadActiveRecording()?.startedAt ?? null);
-  const [activeId, setActiveId] = useState<string | null>(() => loadActiveRecording()?.id ?? null);
+  // activeId != null <=> hay una grabación (persistida en el server) en curso.
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const recordings = useSyncExternalStore(
-    subscribeRecordings,
-    getRecordingsSnapshot,
-    getRecordingsServerSnapshot,
-  );
+  const [pending, setPending] = useState(false);
+  const [recordings, setRecordings] = useState<RecordingFile[]>([]);
 
-  // --- Conexión WebSocket: solo estado + comandos start/stop, sin dibujar la señal aquí ---
+  const refreshRecordings = useCallback(() => {
+    listRecordings()
+      .then(setRecordings)
+      .catch((err) => console.error(err));
+  }, []);
+
+  // --- Estado inicial: por si ya hay una grabación en curso al cargar la página ---
   useEffect(() => {
-    const ws = new WebSocket(WEBSOCKET_URL);
+    refreshRecordings();
+    getHealth()
+      .then((h) => {
+        if (h.recording) {
+          setActiveId(h.recording_file);
+          setStartedAt(Date.now()); // el server no guarda la hora de inicio
+        }
+      })
+      .catch((err) => console.error(err));
+  }, [refreshRecordings]);
+
+  // --- WebSocket: solo estado + datos, los comandos van por HTTP ---
+  useEffect(() => {
+    const ws = new WebSocket(WS_FRONTEND_URL);
     wsRef.current = ws;
     ws.onopen = () => setWsStatus("connected");
     ws.onclose = () => setWsStatus("disconnected");
@@ -44,44 +53,63 @@ export default function RecordingsPage() {
     ws.onmessage = (ev) => {
       try {
         const d = JSON.parse(ev.data);
-        if (typeof d.state !== "string") return;
-        const nowMeasuring = d.state === "measuring";
-
-        setMeasuring((wasMeasuring) => {
-          if (nowMeasuring && !wasMeasuring) {
-            // Reusa el id/hora de una grabación ya activa (evita perder el cronómetro al navegar)
-            const existing = loadActiveRecording();
-            const id = existing?.id ?? newRecordingId();
-            const start = existing?.startedAt ?? Date.now();
-            if (!existing) saveActiveRecording({ id, startedAt: start });
-            setActiveId(id);
-            setStartedAt(start);
-          } else if (!nowMeasuring && wasMeasuring) {
-            const active = loadActiveRecording();
-            if (active) finishActiveRecording(active);
+        if (typeof d.state === "string") {
+          setMeasuring(d.state === "measuring");
+          return;
+        }
+        if (typeof d.rec === "boolean") {
+          if (d.rec) {
+            setActiveId(d.file ?? null);
+            setStartedAt(Date.now());
+          } else {
             setActiveId(null);
             setStartedAt(null);
+            refreshRecordings();
           }
-          return nowMeasuring;
-        });
+        }
       } catch {}
     };
     return () => ws.close();
-  }, []);
+  }, [refreshRecordings]);
 
   // --- Cronómetro de la grabación en curso ---
   useEffect(() => {
-    if (!measuring || startedAt == null) return;
+    if (activeId == null || startedAt == null) return;
     const tick = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [measuring, startedAt]);
+  }, [activeId, startedAt]);
 
-  const toggleMeasurement = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ cmd: measuring ? "stop" : "start" }));
+  const handleStart = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const res = await startRecording();
+      if (res.file) {
+        setActiveId(res.file);
+        setStartedAt(Date.now());
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const handleStop = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await stopRecording();
+      setActiveId(null);
+      setStartedAt(null);
+      refreshRecordings();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPending(false);
+    }
   };
 
   return (
@@ -93,34 +121,46 @@ export default function RecordingsPage() {
 
       <div style={styles.split}>
         <div style={styles.topPane}>
-          {measuring ? (
+          {activeId != null ? (
             <RecordingNowPanel
               activeId={activeId}
               startedAt={startedAt}
               elapsedSeconds={elapsedSeconds}
+              measuring={measuring}
               wsStatus={wsStatus}
-              onStop={toggleMeasurement}
+              pending={pending}
+              onStop={handleStop}
             />
           ) : (
-            <NewRecordingPanel wsStatus={wsStatus} onStart={toggleMeasurement} />
+            <NewRecordingPanel wsStatus={wsStatus} pending={pending} onStart={handleStart} />
           )}
         </div>
 
         <div style={styles.bottomPane}>
           <div style={styles.listHeader}>
-            <span style={styles.listTitle}>Historial</span>
-            <span style={styles.listCount}>{recordings.length} grabaciones</span>
+            <div style={styles.listTitleGroup}>
+              <span style={styles.listTitleIcon}>
+                <ArchiveIcon />
+              </span>
+              <span style={styles.listTitle}>Historial</span>
+            </div>
+            <span style={styles.listCountPill}>{recordings.length} grabaciones</span>
           </div>
           <div style={styles.tableHead}>
             <span style={styles.tableHeadIconCol} />
             <span style={styles.tableHeadCell}>Grabación</span>
-            <span style={styles.tableHeadCellRight}>Duración</span>
+            <span style={styles.tableHeadCellRight}>Tamaño</span>
           </div>
           <div style={styles.rows}>
             {recordings.length === 0 ? (
-              <div style={styles.empty}>Todavía no hay grabaciones.</div>
+              <div style={styles.empty}>
+                <span style={styles.emptyIcon}>
+                  <WaveIcon />
+                </span>
+                Todavía no hay grabaciones.
+              </div>
             ) : (
-              recordings.map((r) => <RecordingRow key={r.id} recording={r} />)
+              recordings.map((r) => <RecordingRow key={r.file} recording={r} />)
             )}
           </div>
         </div>
@@ -133,13 +173,15 @@ export default function RecordingsPage() {
 
 function NewRecordingPanel({
   wsStatus,
+  pending,
   onStart,
 }: {
   wsStatus: string;
+  pending: boolean;
   onStart: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const disabled = wsStatus !== "connected";
+  const disabled = wsStatus !== "connected" || pending;
   const hover = hovered && !disabled;
 
   return (
@@ -163,7 +205,7 @@ function NewRecordingPanel({
         Nueva Grabación
       </button>
       <p style={styles.idleHint}>
-        {disabled
+        {wsStatus !== "connected"
           ? "Esperando conexión con el ESP32…"
           : "Pulsa para empezar a registrar la señal respiratoria."}
       </p>
@@ -177,13 +219,17 @@ function RecordingNowPanel({
   activeId,
   startedAt,
   elapsedSeconds,
+  measuring,
   wsStatus,
+  pending,
   onStop,
 }: {
-  activeId: string | null;
+  activeId: string;
   startedAt: number | null;
   elapsedSeconds: number;
+  measuring: boolean;
   wsStatus: string;
+  pending: boolean;
   onStop: () => void;
 }) {
   return (
@@ -194,16 +240,18 @@ function RecordingNowPanel({
           <span style={styles.liveTitle}>Recording Now</span>
         </div>
         <span style={styles.liveConnText}>
-          {wsStatus === "connected" ? "ESP32 Conectado · Recibiendo datos…" : "Reconectando…"}
+          {wsStatus !== "connected"
+            ? "Reconectando…"
+            : measuring
+              ? "ESP32 Conectado · Recibiendo datos…"
+              : "ESP32 Conectado · Esperando datos…"}
         </span>
       </div>
 
       <div style={styles.liveMetrics}>
         <div style={styles.liveMetric}>
           <div style={styles.metricLabel}>Started</div>
-          <div style={styles.metricValueLg}>
-            {startedAt != null ? formatTime(new Date(startedAt).toISOString()) : "--:--"}
-          </div>
+          <div style={styles.metricValueLg}>{startedAt != null ? formatTime(new Date(startedAt)) : "--:--"}</div>
         </div>
         <div style={styles.liveMetric}>
           <div style={styles.metricLabel}>Duration</div>
@@ -213,12 +261,16 @@ function RecordingNowPanel({
 
       <div style={styles.liveActions}>
         <Link
-          href={activeId ? `/recordings/${activeId}` : "/recordings"}
+          href={`/recordings/${encodeURIComponent(activeId)}`}
           style={{ ...styles.actionBtn, ...styles.actionBtnGhost }}
         >
           Live View
         </Link>
-        <button onClick={onStop} style={{ ...styles.actionBtn, ...styles.actionBtnStop }}>
+        <button
+          onClick={onStop}
+          disabled={pending}
+          style={{ ...styles.actionBtn, ...styles.actionBtnStop, opacity: pending ? 0.6 : 1 }}
+        >
           Stop
         </button>
       </div>
@@ -228,12 +280,17 @@ function RecordingNowPanel({
 
 // --- Fila de grabación ---
 
-function RecordingRow({ recording }: { recording: Recording }) {
+function RecordingRow({ recording }: { recording: RecordingFile }) {
   const [hover, setHover] = useState(false);
+  const date = parseRecordingDate(recording.file);
   return (
     <Link
-      href={`/recordings/${recording.id}`}
-      style={{ ...styles.row, background: hover ? "rgba(17,17,17,0.04)" : "transparent" }}
+      href={`/recordings/${encodeURIComponent(recording.file)}`}
+      style={{
+        ...styles.row,
+        background: hover ? "rgba(0,224,168,0.08)" : "transparent",
+        borderLeft: hover ? `2px solid ${ACCENT}` : "2px solid transparent",
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
@@ -241,12 +298,12 @@ function RecordingRow({ recording }: { recording: Recording }) {
         <WaveIcon />
       </div>
       <div style={styles.rowMain}>
-        <span style={styles.rowName}>{recording.name}</span>
+        <span style={styles.rowName}>{recording.file}</span>
         <span style={styles.rowMeta}>
-          {formatRelativeDate(recording.date)} · {formatTime(recording.date)}
+          {date ? `${formatRelativeDate(date)} · ${formatTime(date)}` : "Fecha desconocida"}
         </span>
       </div>
-      <span style={styles.rowDuration}>{formatDuration(recording.durationSeconds)}</span>
+      <span style={styles.rowSize}>{formatBytes(recording.size_bytes)}</span>
       <ChevronIcon />
     </Link>
   );
@@ -291,6 +348,15 @@ function WaveIcon() {
         strokeLinecap="square"
         strokeLinejoin="miter"
       />
+    </svg>
+  );
+}
+
+function ArchiveIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+      <rect x="3" y="5" width="13" height="14" stroke={INK} strokeWidth="2" />
+      <path d="M16.5 10 21 7.5v9L16.5 14" stroke={INK} strokeWidth="2" strokeLinejoin="miter" />
     </svg>
   );
 }
@@ -352,12 +418,13 @@ const styles: Record<string, CSSProperties> = {
   },
   bottomPane: {
     flexShrink: 0,
-    height: 236,
+    height: 252,
     display: "flex",
     flexDirection: "column",
     background: "#ffffff",
-    border: `1px solid rgba(17,17,17,0.16)`,
-    padding: "14px 20px 4px",
+    border: `2px solid ${INK}`,
+    boxShadow: `6px 6px 0 ${INK}`,
+    padding: "16px 22px 6px",
   },
 
   // idle panel
@@ -486,13 +553,23 @@ const styles: Record<string, CSSProperties> = {
   actionBtnGhost: { background: PAPER },
   actionBtnStop: { background: "#dc2626", color: "#fff" },
 
-  // list — versión más fina, tirando a tabla, sin el sombreado brutalista pesado
+  // list — cabecera con icono + pill de conteo, filas con acento en hover
   listHeader: {
     display: "flex",
-    alignItems: "baseline",
+    alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 8,
+    marginBottom: 10,
     flexShrink: 0,
+  },
+  listTitleGroup: { display: "flex", alignItems: "center", gap: 8 },
+  listTitleIcon: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 22,
+    height: 22,
+    background: ACCENT,
+    border: `1.5px solid ${INK}`,
   },
   listTitle: {
     fontFamily: MONO,
@@ -501,10 +578,15 @@ const styles: Record<string, CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.06em",
   },
-  listCount: {
+  listCountPill: {
     fontFamily: MONO,
     fontSize: 10,
-    color: "#888",
+    fontWeight: 700,
+    color: INK,
+    background: "rgba(17,17,17,0.06)",
+    border: "1px solid rgba(17,17,17,0.16)",
+    borderRadius: 999,
+    padding: "3px 10px",
     textTransform: "uppercase",
     letterSpacing: "0.04em",
   },
@@ -512,11 +594,11 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    padding: "0 4px 6px",
-    borderBottom: `1px solid rgba(17,17,17,0.5)`,
+    padding: "0 4px 8px",
+    borderBottom: `2px solid ${INK}`,
     flexShrink: 0,
   },
-  tableHeadIconCol: { flexShrink: 0, width: 22 },
+  tableHeadIconCol: { flexShrink: 0, width: 30 },
   tableHeadCell: {
     flex: 1,
     fontFamily: MONO,
@@ -546,22 +628,32 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    padding: "8px 4px",
+    padding: "9px 6px 9px 4px",
     borderBottom: "1px solid rgba(17,17,17,0.08)",
     textDecoration: "none",
     color: INK,
+    transition: "background-color 0.12s ease, border-color 0.12s ease",
   },
   rowIcon: {
     flexShrink: 0,
-    width: 22,
-    height: 22,
+    width: 26,
+    height: 26,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     color: "#888",
+    background: PAPER,
+    border: "1px solid rgba(17,17,17,0.16)",
   },
   rowMain: { display: "flex", flexDirection: "row", alignItems: "baseline", gap: 8, minWidth: 0, flex: 1 },
-  rowName: { fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  rowName: {
+    fontFamily: MONO,
+    fontSize: 11.5,
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
   rowMeta: {
     fontFamily: MONO,
     fontSize: 10,
@@ -570,19 +662,37 @@ const styles: Record<string, CSSProperties> = {
     letterSpacing: "0.03em",
     whiteSpace: "nowrap",
   },
-  rowDuration: {
+  rowSize: {
     fontFamily: MONO,
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: 800,
-    color: "#555",
+    color: INK,
+    background: "rgba(17,17,17,0.05)",
+    border: "1px solid rgba(17,17,17,0.14)",
+    borderRadius: 999,
+    padding: "3px 10px",
     flexShrink: 0,
   },
   empty: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
     fontFamily: MONO,
     fontSize: 11,
     color: "#888",
     textTransform: "uppercase",
     letterSpacing: "0.04em",
     padding: "16px 4px",
+  },
+  emptyIcon: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 36,
+    height: 36,
+    border: "2px dashed rgba(17,17,17,0.3)",
   },
 };
