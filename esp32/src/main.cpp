@@ -9,7 +9,7 @@ const unsigned long LOOP_TIME = 50;
 const char* ssid     = "MIWIFI_g4hr 2G";
 const char* password = "GNjkqFXs";
 const char* host = "13.48.132.12";
-const uint16_t port  = 8080;
+const uint16_t port  = 8000;
 
 WebSocketsClient ws;
 SensirionI2CSdp sdp;
@@ -58,6 +58,12 @@ void setup() {
 
 void loop() {
   ws.loop();   // imprescindible, gestiona la conexion
+
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 2000) {
+    lastPrint = millis();
+    Serial.printf("WiFi: %d, WS: %d\n", WiFi.status(), ws.isConnected());
+  }
 
   if (measuring && millis() - last >= LOOP_TIME) {    // <-- solo envia si measuring
     last = millis();

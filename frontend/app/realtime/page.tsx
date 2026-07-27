@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
 
-const WEBSOCKET_URL = "ws://13.48.132.12:8080/frontend"; // debe apuntar al mismo host que usa el ESP32
+const WEBSOCKET_URL = "ws://13.48.132.12:8000/frontend"; // debe apuntar al mismo host que usa el ESP32
 const MAX_POINTS = 200;
 
 export default function RespirationMonitor() {
@@ -11,7 +11,10 @@ export default function RespirationMonitor() {
   const wsRef = useRef<WebSocket | null>(null);
 
   const [status, setStatus] = useState("connecting");
-  const [latestSample, setLatestSample] = useState({ pressure: 0, temperature: 0 });
+  const [latestSample, setLatestSample] = useState({
+    pressure: 0,
+    temperature: 0,
+  });
   const [measuring, setMeasuring] = useState(false);
 
   // --- Conexión WebSocket ---
@@ -34,7 +37,8 @@ export default function RespirationMonitor() {
         // si no, es una muestra: {t, p, temp}
         if (typeof d.p !== "number") return; // guarda por si acaso
         samplesBuffer.current.push(d.p);
-        if (samplesBuffer.current.length > MAX_POINTS) samplesBuffer.current.shift();
+        if (samplesBuffer.current.length > MAX_POINTS)
+          samplesBuffer.current.shift();
         setLatestSample({ pressure: d.p, temperature: d.temp });
       } catch {}
     };
@@ -232,41 +236,57 @@ function MeasurementButton({
 }) {
   const [hovered, setHovered] = useState(false);
   const interactiveHover = hovered && !disabled;
+  const breathing = !measuring && !disabled && !interactiveHover;
 
   return (
-    <button
-      onClick={onToggle}
-      disabled={disabled}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        ...styles.measureButton,
-        background: interactiveHover ? PAPER : INK,
-        color: interactiveHover ? INK : PAPER,
-        opacity: disabled ? 0.4 : 1,
-        cursor: disabled ? "not-allowed" : "pointer",
-        boxShadow: interactiveHover
-          ? `5px 5px 0 ${INK}`
-          : `4px 4px 0 ${INK}`,
-        transform: interactiveHover ? "translate(-1px, -1px)" : "none",
-      }}
-    >
-      {measuring ? (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={interactiveHover ? INK : PAPER}>
-          <rect x="5" y="5" width="14" height="14" />
-        </svg>
-      ) : (
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill={interactiveHover ? INK : PAPER}
-        >
-          <polygon points="6,4 20,12 6,20" />
-        </svg>
-      )}
-      {measuring ? "Stop" : "Start"}
-    </button>
+    <>
+      <button
+        onClick={onToggle}
+        disabled={disabled}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        className={breathing ? "measure-breathe" : undefined}
+        style={{
+          ...styles.measureButton,
+          background: PAPER,
+          color: INK,
+          border: interactiveHover ? `2px solid ${ACCENT}` : `2px solid ${INK}`,
+          opacity: disabled ? 0.4 : 1,
+          cursor: disabled ? "not-allowed" : "pointer",
+          boxShadow: interactiveHover
+            ? `5px 5px 0 ${ACCENT}`
+            : `4px 4px 0 ${INK}`,
+          transform: interactiveHover ? "translate(-1px, -1px)" : "none",
+        }}
+      >
+        {measuring ? (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill={INK}>
+            <rect x="5" y="5" width="14" height="14" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill={INK}>
+            <polygon points="6,4 20,12 6,20" />
+          </svg>
+        )}
+        {measuring ? "Stop" : "Start"}
+      </button>
+      <style>{`
+        .measure-breathe {
+          animation: measureBreathe 2.4s ease-in-out infinite;
+        }
+        @keyframes measureBreathe {
+          0%,
+          100% {
+            transform: translateY(0);
+            box-shadow: 4px 4px 0 ${INK};
+          }
+          50% {
+            transform: translateY(-3px);
+            box-shadow: 6px 7px 0 ${INK};
+          }
+        }
+      `}</style>
+    </>
   );
 }
 
@@ -340,11 +360,12 @@ const styles: Record<string, CSSProperties> = {
     gap: 10,
   },
   measureButton: {
+    position: "relative",
     display: "flex",
     alignItems: "center",
     gap: 6,
-    background: INK,
-    color: PAPER,
+    background: PAPER,
+    color: INK,
     border: `2px solid ${INK}`,
     boxShadow: `4px 4px 0 ${INK}`,
     padding: "8px 14px",

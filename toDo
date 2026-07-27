@@ -1,0 +1,9 @@
+- mover Hz de ESP32. 10Hz ahora pero se propone quiza 25Hz incluso
+
+- cuidado con cojas que se queden colgando : esp32 sin grabar , o grabaanaaado...grabaaacion que no aacaabaaa nunca. o se queda pillao el servidor , ui, o esp32 pensanado que esta grabando y no...etc
+
+- cosas tipo : que la esp32 si pierde wifi, pues guarde datos en local buffer y envie
+
+servidor aal iniciar siempre verifique si quedaa muerto aalguna recording con time:ended NULL (es malo porque el usuario no podria iniciar nnueva grabacion)
+
+pensar escenaario sy hacer pruebas

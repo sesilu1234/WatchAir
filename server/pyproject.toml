@@ -1,0 +1,9 @@
+[project]
+name = "watchair-server"
+version = "0.1.0"
+description = "WebSocket entre el ESP32 y el frontend de WatchAir"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+]
