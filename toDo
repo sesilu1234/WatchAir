@@ -45,6 +45,9 @@ async def sensor(ws: WebSocket):
 
 
 
+- ver quien es responsable de que vaya a tirones
+-conteo de hora esta mal creo o empieza el numero un plein mal un momento
+
 
 
 
