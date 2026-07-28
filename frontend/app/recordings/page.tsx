@@ -1,28 +1,37 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
-  getHealth,
+  getStatus,
+  isRecordingState,
+  isSensorState,
   listRecordings,
   startRecording,
   stopRecording,
-  WS_FRONTEND_URL,
-  type RecordingFile,
+  type Recording,
 } from "../lib/api";
-import { formatBytes, formatClock, formatRelativeDate, formatTime, parseRecordingDate } from "../lib/format";
+import { useFrontendSocket, type WsStatus } from "../lib/useFrontendSocket";
+import {
+  durationSeconds,
+  formatClock,
+  formatNumber,
+  formatRelativeDate,
+  formatTime,
+  recordingName,
+} from "../lib/format";
 
 export default function RecordingsPage() {
-  const wsRef = useRef<WebSocket | null>(null);
-
-  const [wsStatus, setWsStatus] = useState("connecting");
   const [measuring, setMeasuring] = useState(false);
-  // activeId != null <=> hay una grabación (persistida en el server) en curso.
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  // active != null <=> hay una grabación en curso (la que no tiene ended_at).
+  const [active, setActive] = useState<Recording | null>(null);
+  // Date.now() - clockOffsetMs = hora del server: el cronómetro cuenta bien
+  // aunque el reloj del navegador esté desfasado.
+  const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
-  const [recordings, setRecordings] = useState<RecordingFile[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [recordings, setRecordings] = useState<Recording[]>([]);
 
   const refreshRecordings = useCallback(() => {
     listRecordings()
@@ -30,87 +39,69 @@ export default function RecordingsPage() {
       .catch((err) => console.error(err));
   }, []);
 
-  // --- Estado inicial: por si ya hay una grabación en curso al cargar la página ---
-  useEffect(() => {
-    refreshRecordings();
-    getHealth()
-      .then((h) => {
-        if (h.recording) {
-          setActiveId(h.recording_file);
-          setStartedAt(Date.now()); // el server no guarda la hora de inicio
-        }
+  // Estado real del server: si al entrar ya hay una grabación en curso, la
+  // recuperamos con su started_at para seguir contando desde donde iba.
+  const syncStatus = useCallback(() => {
+    getStatus()
+      .then((s) => {
+        setActive(s.recording);
+        setMeasuring(s.measuring);
+        setClockOffsetMs(s.clockOffsetMs);
       })
       .catch((err) => console.error(err));
-  }, [refreshRecordings]);
+  }, []);
 
-  // --- WebSocket: solo estado + datos, los comandos van por HTTP ---
   useEffect(() => {
-    const ws = new WebSocket(WS_FRONTEND_URL);
-    wsRef.current = ws;
-    ws.onopen = () => setWsStatus("connected");
-    ws.onclose = () => setWsStatus("disconnected");
-    ws.onerror = () => setWsStatus("error");
-    ws.onmessage = (ev) => {
-      try {
-        const d = JSON.parse(ev.data);
-        if (typeof d.state === "string") {
-          setMeasuring(d.state === "measuring");
-          return;
-        }
-        if (typeof d.rec === "boolean") {
-          if (d.rec) {
-            setActiveId(d.file ?? null);
-            setStartedAt(Date.now());
-          } else {
-            setActiveId(null);
-            setStartedAt(null);
-            refreshRecordings();
-          }
-        }
-      } catch {}
-    };
-    return () => ws.close();
-  }, [refreshRecordings]);
+    syncStatus();
+    refreshRecordings();
+  }, [syncStatus, refreshRecordings]);
 
-  // --- Cronómetro de la grabación en curso ---
-  useEffect(() => {
-    if (activeId == null || startedAt == null) return;
-    const tick = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [activeId, startedAt]);
-
-  const handleStart = async () => {
-    if (pending) return;
-    setPending(true);
-    try {
-      const res = await startRecording();
-      if (res.file) {
-        setActiveId(res.file);
-        setStartedAt(Date.now());
+  const handleMessage = useCallback(
+    (data: unknown) => {
+      if (isSensorState(data)) {
+        setMeasuring(data.state === "measuring");
+        return;
       }
+      if (isRecordingState(data)) {
+        setActive(data.rec ? data.recording : null);
+        if (!data.rec) refreshRecordings();
+      }
+    },
+    [refreshRecordings],
+  );
+
+  // onOpen re-sincroniza tras cada reconexión
+  const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: syncStatus });
+
+  // Cronómetro de la grabación en curso. Se refresca cada 250 ms para que al
+  // entrar en la página el valor real aparezca sin salto visible (React descarta
+  // el render cuando el número no cambia, así que sale gratis).
+  useEffect(() => {
+    if (active == null) return;
+    const startedAt = Date.parse(active.started_at);
+    const id = setInterval(
+      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - clockOffsetMs - startedAt) / 1000))),
+      250,
+    );
+    return () => clearInterval(id);
+  }, [active, clockOffsetMs]);
+
+  const run = async (action: () => Promise<Recording>) => {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const rec = await action();
+      setActive(rec.ended_at === null ? rec : null);
+      if (rec.ended_at !== null) refreshRecordings();
     } catch (err) {
-      console.error(err);
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPending(false);
     }
   };
 
-  const handleStop = async () => {
-    if (pending) return;
-    setPending(true);
-    try {
-      await stopRecording();
-      setActiveId(null);
-      setStartedAt(null);
-      refreshRecordings();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setPending(false);
-    }
-  };
+  const history = recordings.filter((r) => r.id !== active?.id);
 
   return (
     <main style={styles.main}>
@@ -121,18 +112,23 @@ export default function RecordingsPage() {
 
       <div style={styles.split}>
         <div style={styles.topPane}>
-          {activeId != null ? (
+          {active != null ? (
             <RecordingNowPanel
-              activeId={activeId}
-              startedAt={startedAt}
+              active={active}
               elapsedSeconds={elapsedSeconds}
               measuring={measuring}
               wsStatus={wsStatus}
               pending={pending}
-              onStop={handleStop}
+              error={error}
+              onStop={() => run(stopRecording)}
             />
           ) : (
-            <NewRecordingPanel wsStatus={wsStatus} pending={pending} onStart={handleStart} />
+            <NewRecordingPanel
+              wsStatus={wsStatus}
+              pending={pending}
+              error={error}
+              onStart={() => run(startRecording)}
+            />
           )}
         </div>
 
@@ -144,15 +140,15 @@ export default function RecordingsPage() {
               </span>
               <span style={styles.listTitle}>Historial</span>
             </div>
-            <span style={styles.listCountPill}>{recordings.length} grabaciones</span>
+            <span style={styles.listCountPill}>{history.length} grabaciones</span>
           </div>
           <div style={styles.tableHead}>
             <span style={styles.tableHeadIconCol} />
             <span style={styles.tableHeadCell}>Grabación</span>
-            <span style={styles.tableHeadCellRight}>Tamaño</span>
+            <span style={styles.tableHeadCellRight}>Duración</span>
           </div>
           <div style={styles.rows}>
-            {recordings.length === 0 ? (
+            {history.length === 0 ? (
               <div style={styles.empty}>
                 <span style={styles.emptyIcon}>
                   <WaveIcon />
@@ -160,7 +156,7 @@ export default function RecordingsPage() {
                 Todavía no hay grabaciones.
               </div>
             ) : (
-              recordings.map((r) => <RecordingRow key={r.file} recording={r} />)
+              history.map((r) => <RecordingRow key={r.id} recording={r} />)
             )}
           </div>
         </div>
@@ -174,10 +170,12 @@ export default function RecordingsPage() {
 function NewRecordingPanel({
   wsStatus,
   pending,
+  error,
   onStart,
 }: {
-  wsStatus: string;
+  wsStatus: WsStatus;
   pending: boolean;
+  error: string | null;
   onStart: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -204,11 +202,15 @@ function NewRecordingPanel({
         <PlusIcon />
         Nueva Grabación
       </button>
-      <p style={styles.idleHint}>
-        {wsStatus !== "connected"
-          ? "Esperando conexión con el ESP32…"
-          : "Pulsa para empezar a registrar la señal respiratoria."}
-      </p>
+      {error != null ? (
+        <p style={styles.errorHint}>{error}</p>
+      ) : (
+        <p style={styles.idleHint}>
+          {wsStatus !== "connected"
+            ? "Esperando conexión con el servidor…"
+            : "Pulsa para empezar a registrar la señal respiratoria."}
+        </p>
+      )}
     </div>
   );
 }
@@ -216,20 +218,20 @@ function NewRecordingPanel({
 // --- Panel superior: grabando ---
 
 function RecordingNowPanel({
-  activeId,
-  startedAt,
+  active,
   elapsedSeconds,
   measuring,
   wsStatus,
   pending,
+  error,
   onStop,
 }: {
-  activeId: string;
-  startedAt: number | null;
+  active: Recording;
   elapsedSeconds: number;
   measuring: boolean;
-  wsStatus: string;
+  wsStatus: WsStatus;
   pending: boolean;
+  error: string | null;
   onStop: () => void;
 }) {
   return (
@@ -251,19 +253,20 @@ function RecordingNowPanel({
       <div style={styles.liveMetrics}>
         <div style={styles.liveMetric}>
           <div style={styles.metricLabel}>Started</div>
-          <div style={styles.metricValueLg}>{startedAt != null ? formatTime(new Date(startedAt)) : "--:--"}</div>
+          <div style={styles.metricValueLg}>{formatTime(new Date(active.started_at))}</div>
         </div>
         <div style={styles.liveMetric}>
           <div style={styles.metricLabel}>Duration</div>
           <div style={styles.metricValueLg}>{formatClock(elapsedSeconds)}</div>
         </div>
+        <div style={styles.liveMetric}>
+          <div style={styles.metricLabel}>Nombre</div>
+          <div style={styles.metricValueSm}>{recordingName(active.started_at)}</div>
+        </div>
       </div>
 
       <div style={styles.liveActions}>
-        <Link
-          href={`/recordings/${encodeURIComponent(activeId)}`}
-          style={{ ...styles.actionBtn, ...styles.actionBtnGhost }}
-        >
+        <Link href={`/recordings/${active.id}`} style={{ ...styles.actionBtn, ...styles.actionBtnGhost }}>
           Live View
         </Link>
         <button
@@ -273,6 +276,7 @@ function RecordingNowPanel({
         >
           Stop
         </button>
+        {error != null && <span style={styles.errorInline}>{error}</span>}
       </div>
     </div>
   );
@@ -280,12 +284,14 @@ function RecordingNowPanel({
 
 // --- Fila de grabación ---
 
-function RecordingRow({ recording }: { recording: RecordingFile }) {
+function RecordingRow({ recording }: { recording: Recording }) {
   const [hover, setHover] = useState(false);
-  const date = parseRecordingDate(recording.file);
+  const date = new Date(recording.started_at);
+  const seconds = durationSeconds(recording.started_at, recording.ended_at);
+
   return (
     <Link
-      href={`/recordings/${encodeURIComponent(recording.file)}`}
+      href={`/recordings/${recording.id}`}
       style={{
         ...styles.row,
         background: hover ? "rgba(0,224,168,0.08)" : "transparent",
@@ -298,27 +304,25 @@ function RecordingRow({ recording }: { recording: RecordingFile }) {
         <WaveIcon />
       </div>
       <div style={styles.rowMain}>
-        <span style={styles.rowName}>{recording.file}</span>
+        <span style={styles.rowName}>{recordingName(recording.started_at)}</span>
         <span style={styles.rowMeta}>
-          {date ? `${formatRelativeDate(date)} · ${formatTime(date)}` : "Fecha desconocida"}
+          {formatRelativeDate(date)} · {formatTime(date)} · {formatNumber(recording.samples)}{" "}
+          muestras
         </span>
       </div>
-      <span style={styles.rowSize}>{formatBytes(recording.size_bytes)}</span>
+      <span style={styles.rowDuration}>{seconds == null ? "En curso" : formatClock(seconds)}</span>
       <ChevronIcon />
     </Link>
   );
 }
 
-function ConnectionBadge({ status }: { status: string }) {
-  const config =
-    (
-      {
-        connected: { color: "#00e0a8", text: "ESP32 Conectado" },
-        connecting: { color: "#ca8a04", text: "Conectando" },
-        disconnected: { color: "#dc2626", text: "Desconectado" },
-        error: { color: "#dc2626", text: "Error de red" },
-      } as Record<string, { color: string; text: string }>
-    )[status] || { color: "#9ca3af", text: status };
+function ConnectionBadge({ status }: { status: WsStatus }) {
+  const config = {
+    connected: { color: "#00e0a8", text: "Servidor Conectado" },
+    connecting: { color: "#ca8a04", text: "Conectando" },
+    disconnected: { color: "#dc2626", text: "Desconectado" },
+    error: { color: "#dc2626", text: "Error de red" },
+  }[status];
 
   return (
     <div style={{ ...styles.badge, background: config.color }}>
@@ -461,6 +465,26 @@ const styles: Record<string, CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
   },
+  errorHint: {
+    fontFamily: MONO,
+    fontSize: 11,
+    color: "#dc2626",
+    fontWeight: 700,
+    margin: 0,
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    textAlign: "center",
+    maxWidth: 420,
+  },
+  errorInline: {
+    alignSelf: "center",
+    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#dc2626",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+  },
   badge: {
     display: "flex",
     alignItems: "center",
@@ -519,7 +543,7 @@ const styles: Record<string, CSSProperties> = {
     letterSpacing: "0.03em",
     color: "#555",
   },
-  liveMetrics: { display: "flex", gap: 14 },
+  liveMetrics: { display: "flex", gap: 14, flexWrap: "wrap" },
   liveMetric: {
     flex: "0 0 auto",
     border: `2px solid ${INK}`,
@@ -535,7 +559,8 @@ const styles: Record<string, CSSProperties> = {
     color: "#555",
   },
   metricValueLg: { fontSize: 24, fontWeight: 900, marginTop: 4, fontFamily: MONO },
-  liveActions: { display: "flex", gap: 12 },
+  metricValueSm: { fontSize: 15, fontWeight: 900, marginTop: 8, fontFamily: MONO },
+  liveActions: { display: "flex", gap: 12, flexWrap: "wrap" },
   actionBtn: {
     flex: "0 0 auto",
     padding: "12px 22px",
@@ -662,7 +687,7 @@ const styles: Record<string, CSSProperties> = {
     letterSpacing: "0.03em",
     whiteSpace: "nowrap",
   },
-  rowSize: {
+  rowDuration: {
     fontFamily: MONO,
     fontSize: 10.5,
     fontWeight: 800,

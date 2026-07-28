@@ -17,3 +17,36 @@ Diagnosed conflict state and prescribed prerequisite action
 Eso es la guarda funcionando como debe: has intentado parar el sensor mientras hay una grabación en curso, y el servidor lo bloquea para que no cortes la grabación sin querer.
 
 Comprueba el estado:
+
+
+
+
+- El cambio peligroso, y este sí lo revertiría YA:
+
+En el finally del WS /sensor: si el ESP32 se desconecta, cierra la grabación en curso. Piensa en tu caso de uso real: estás durmiendo, el router parpadea 3 segundos a las 2 AM, el WS se cae, el ESP32 reconecta solo (para eso pusimos el setReconnectInterval y el watchdog)... y el server ya ha matado la grabación de la noche. Te despiertas con 2 horas grabadas en vez de 8. Es exactamente lo contrario de lo que el sistema debe hacer. Lo correcto: la grabación sobrevive a las caídas del sensor (queda un hueco en los datos, que además es información diagnóstica), y la huérfana solo se cierra en el arranque del server, como ya teníamos. Sustituye el final del endpoint por:
+
+python
+@app.websocket("/sensor")
+async def sensor(ws: WebSocket):
+    await manager.connect_sensor(ws)
+    try:
+        while True:
+            message = await ws.receive_text()
+            await manager.broadcast_frontends(message)
+            handle_sensor_message(message)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if manager.disconnect_sensor(ws) and recorder.active:
+            # recording survives sensor dropouts: the gap in the data is
+            # itself useful info; orphans are only closed at server startup
+            log.warning("ESP32 dropped during recording %s; keeping it open", recorder.rec_id)
+
+
+
+
+
+
+
+
+            -Un matiz menor que te dejo apuntado: manager.measuring se pone a False en cada reconexión del ESP32, pero si el sensor estaba midiendo y solo se cayó el WS, seguirá midiendo sin que el server lo sepa (el firmware solo reporta estado al recibir start/stop). El /status puede mentir ahí. La solución es que el firmware reporte su estado al conectar el WS — que es justo lo que te propuse en su día y me hiciste quitar, jaja. Cuando quieras lo recuperamos.

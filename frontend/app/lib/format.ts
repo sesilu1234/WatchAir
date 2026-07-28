@@ -1,30 +1,31 @@
-// Formato de fechas, duraciones y tamaños. El backend nombra los ficheros
-// como rec_YYYYMMDD_HHMMSS.csv, así que la fecha se extrae del nombre.
-const FILENAME_RE = /rec_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/;
+// Formato de fechas y duraciones. El backend identifica las grabaciones por UUID,
+// así que el nombre visible se deriva de started_at.
+const pad = (n: number) => String(n).padStart(2, "0");
 
-export function parseRecordingDate(file: string): Date | null {
-  const m = FILENAME_RE.exec(file);
-  if (!m) return null;
-  const [, y, mo, d, h, mi, s] = m.slice(1).map(Number);
-  return new Date(y, mo - 1, d, h, mi, s);
+// "REC_20260728_100200" — nombre legible y ordenable de una grabación.
+export function recordingName(startedAt: string): string {
+  const d = new Date(startedAt);
+  if (Number.isNaN(d.getTime())) return "REC_—";
+  return (
+    `REC_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
+    `_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  );
 }
 
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// "00:03:27" — para el cronómetro de la grabación en curso.
+// "00:03:27" — cronómetro de la grabación en curso y duración de las terminadas.
 export function formatClock(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = Math.floor(totalSeconds % 60);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+  const s = Math.max(0, Math.floor(totalSeconds));
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
-// "Hoy" / "Ayer" / "25 Jul"
+// Duración de una grabación ya cerrada; null si sigue en curso.
+export function durationSeconds(startedAt: string, endedAt: string | null): number | null {
+  if (endedAt === null) return null;
+  const ms = Date.parse(endedAt) - Date.parse(startedAt);
+  return Number.isFinite(ms) ? Math.max(0, ms / 1000) : null;
+}
+
+// "Hoy" / "Ayer" / "25 jul"
 export function formatRelativeDate(date: Date): string {
   const now = new Date();
   const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -37,4 +38,17 @@ export function formatRelativeDate(date: Date): string {
 
 export function formatTime(date: Date): string {
   return date.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+}
+
+export function formatDate(date: Date): string {
+  return date.toLocaleDateString("es-ES", { day: "2-digit", month: "long", year: "numeric" });
+}
+
+// Números con coma decimal y separador de miles, como el resto de la UI.
+export function formatNumber(value: number, decimals = 0): string {
+  if (!Number.isFinite(value)) return "—";
+  return value.toLocaleString("es-ES", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
 }

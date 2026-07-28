@@ -93,7 +93,7 @@ void loop() {
   // --- Diagnostico periodico ---
   if (millis() - lastPrint > 10000) {
     lastPrint = millis();
-    Serial.printf("WiFi: %d, WS: %d, measuring: %d\n",
+    Serial.printf("WiFi: %d, WS: %d, measuring: %d\n\n",
                   WiFi.status(), ws.isConnected(), measuring);
   }
 
@@ -102,7 +102,7 @@ void loop() {
     last = millis();
     float p, t;
     if (sdp.readMeasurement(p, t) == 0) {
-      p = -p;   // canula en el puerto opuesto -> invierte signo (quita esta linea si no aplica)
+      p = -(-p);   // canula en el puerto opuesto -> invierte signo (quita esta linea si no aplica)
       char buf[64];
       snprintf(buf, sizeof(buf), "{\"t\":%lu,\"p\":%.3f,\"temp\":%.2f}", millis(), p, t);
       if (ws.isConnected()) ws.sendTXT(buf);
