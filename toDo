@@ -167,3 +167,68 @@ Duración media de respiración
 
 
 12. en readme o algun otro sitio, documentar bien todo lo hecho. tanto para lector como para mi recordar que tengo y qué hay
+
+
+13. movil
+
+
+14. manager.measuring no se si tiene sentido ? o quizas sí y solo replica (aunque tiene que estar siempre replicado , al mesauring de la esp32)...na mejor no, por desconexiones de la esp32...simplemente o recibe por webscoket measures de esp32 o no, ya esta...
+
+eso no tiene sentido porque entonces si está en stop , aparecería como desonectado (entonces seria con ping, pero ni hace falta, simplemente con que la global variable esp32 esté ya vale)
+
+
+
+15. leer los codigos para ver , saber, comprobar
+
+
+
+16. en esp32, poner que si pierde conexion WS, deje de hacer mediciones
+
+
+
+17. al empezar a grabar, siempre poner a on primero, y despues no se puede stop mientras haya self.recording = True. al parar grabacion sí que es verdad que es bueno que se ponga a stop
+
+
+
+18. cuando recibe muestra el servidor, el timestamp lo pone esp32. si se desconectara de la luz, despues empezaria milis a 0 y descuadraria todos los datos. quizas mejor que el timestamp lo ponga el server ...o no porque si tarda el wifi de esp32 a server, entonces que lo haga server no es reliable en absoluto. simplemente si se desconecta esp32, se da la recording por finalizada y el usuario se jode ajo y agua     (y tiene que detectar que detectarse bien esto...si el server no lo detecta y esp32 se reconecta super rapido pero mills a 0 ... pues mal la grabacion y no se guarda nada)
+
+es bueno que el aparato tenga bateria propia por tanto...y ademas no deje empezar grabacion si no tiene bateria para 2 horas por lo menos ( o esto no quizas... ? )
+
+
+
+quizas para esto , cuando se reencienda, y conecte al wifi, lo primero que hace es decir 'hey the fella is back on business' , y eso quiere decir que se reseteado porque el programa empieza y por tanto milis a 0
+
+
+19.  tambien puede ocurrir que sensor se desconecte o roto o i2c vaya mal, en ese caso : 
+
+
+
+
+
+
+
+
+20. para grabacion, si ha habido caida de desconexion , entonces si despues se reconecta a wifi y reanuda las measures, la grafica quedará rara...(si no llega a haber mas measures  en nignun momento la grafica queda bien, aunque diria ended_at en un momento distinto...en verdad en este caso se puede poner la grafica hasta ended_at quizas)
+
+ habra un hueco entre medida ultima antes de caida y la medida primera apartir de reconexion, que hay que rellenar señalando con algun color o algo , con un algoritmo que 
+
+
+
+
+
+
+21. respecto a caidas del server o algun reset en algun momento: 
+
+
+nada. en principio si crashea se queda guardado lo que habia. simplemente al inicar, poner ended_at el que no lo tenga (con now() o calculando con las muestras)
+
+22.       
+
+
+
+
+
+
+
+
+
