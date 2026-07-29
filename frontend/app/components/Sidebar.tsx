@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
+import { useCompact } from "../lib/useCompact";
 
 const STORAGE_KEY = "watchair:sidebar-collapsed";
 const EXPANDED_WIDTH = 236;
@@ -22,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const compact = useCompact();
   const [collapsed, setCollapsed] = useState(false);
   const [toggleHovered, setToggleHovered] = useState(false);
 
@@ -40,6 +42,31 @@ export default function Sidebar() {
     });
   };
 
+  const isActive = (href: string) => pathname === href || !!pathname?.startsWith(`${href}/`);
+
+  // En móvil la columna lateral se comería media pantalla: se cambia por una
+  // barra de pestañas abajo (globals.css la coloca ahí con column-reverse).
+  if (compact) {
+    return (
+      <nav style={m.bar}>
+        {NAV_ITEMS.map((item) => {
+          const active = isActive(item.href);
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              style={{ ...m.tab, ...(active ? m.tabActive : null) }}
+            >
+              <Icon active={active} />
+              <span style={m.tabLabel}>{item.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
+    );
+  }
+
   return (
     <aside style={{ ...s.aside, width: collapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH }}>
       {/* Marca */}
@@ -57,18 +84,14 @@ export default function Sidebar() {
 
       {/* Navegación */}
       <nav style={s.nav}>
-        {NAV_ITEMS.map((item) => {
-          const active =
-            pathname === item.href || pathname?.startsWith(`${item.href}/`);
-          return (
-            <NavLink
-              key={item.href}
-              item={item}
-              active={!!active}
-              collapsed={collapsed}
-            />
-          );
-        })}
+        {NAV_ITEMS.map((item) => (
+          <NavLink
+            key={item.href}
+            item={item}
+            active={isActive(item.href)}
+            collapsed={collapsed}
+          />
+        ))}
       </nav>
 
       {/* Usuario */}
@@ -368,5 +391,45 @@ const s: Record<string, CSSProperties> = {
     background: INK,
     boxShadow: `3px 3px 0 ${INK}`,
     transform: "translate(-1px, -1px)",
+  },
+};
+
+// --- Estilos de la barra inferior (móvil) ---
+const m: Record<string, CSSProperties> = {
+  bar: {
+    flexShrink: 0,
+    display: "flex",
+    background: PAPER,
+    borderTop: `2px solid ${INK}`,
+    boxShadow: "0 -6px 18px rgba(17,17,17,0.05)",
+    // safe-area: el gesto de "atrás" de Android y la barra del iPhone.
+    paddingBottom: "env(safe-area-inset-bottom)",
+    fontFamily: "'Helvetica Neue', Arial, sans-serif",
+  },
+  tab: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    padding: "9px 6px",
+    minHeight: 54,
+    boxSizing: "border-box",
+    color: INK,
+    textDecoration: "none",
+    borderTop: "3px solid transparent",
+  },
+  tabActive: {
+    background: ACCENT,
+    borderTop: `3px solid ${INK}`,
+  },
+  tabLabel: {
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    lineHeight: 1,
   },
 };

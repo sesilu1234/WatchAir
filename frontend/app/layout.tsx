@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Sidebar from "./components/Sidebar";
@@ -18,6 +18,15 @@ export const metadata: Metadata = {
   description: "Monitorización respiratoria en tiempo real",
 };
 
+// viewportFit: "cover" para poder usar env(safe-area-inset-*) en la barra
+// inferior; sin userScalable para no bloquear el zoom del navegador.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#f2f1ec",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -30,7 +39,7 @@ export default function RootLayout({
     >
       <body className="flex h-full overflow-hidden">
         <Sidebar />
-        <div className="h-full min-w-0 flex-1 overflow-hidden">{children}</div>
+        <div className="app-content h-full min-w-0 flex-1 overflow-hidden">{children}</div>
       </body>
     </html>
   );

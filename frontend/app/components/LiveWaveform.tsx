@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
 import { WS_FRONTEND_URL, startSensor, stopSensor } from "../lib/api";
+import { useCompact } from "../lib/useCompact";
 
 const MAX_POINTS = 200;
 
@@ -15,6 +16,7 @@ export default function LiveWaveform({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const samplesBuffer = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+  const compact = useCompact();
 
   const [status, setStatus] = useState("connecting");
   const [latestSample, setLatestSample] = useState({
@@ -148,7 +150,7 @@ export default function LiveWaveform({
 
   return (
     <>
-      <div style={styles.statusCorner}>
+      <div style={{ ...styles.statusCorner, ...(compact ? mobile.statusCorner : null) }}>
         <ConnectionStatusBadge status={status} measuring={measuring} />
         {!hideMeasurementButton && (
           <MeasurementButton
@@ -159,20 +161,22 @@ export default function LiveWaveform({
         )}
       </div>
 
-      <section style={styles.card}>
-        <div style={styles.graphHeader}>
+      <section style={{ ...styles.card, ...(compact ? mobile.card : null) }}>
+        <div style={{ ...styles.graphHeader, ...(compact ? mobile.graphHeader : null) }}>
           <span style={styles.graphTitle}>Flujo de aire (Presión)</span>
-          <div style={styles.graphHeaderRight}>
-            <div style={styles.metrics}>
+          <div style={{ ...styles.graphHeaderRight, ...(compact ? mobile.graphHeaderRight : null) }}>
+            <div style={{ ...styles.metrics, ...(compact ? mobile.metrics : null) }}>
               <Metric
                 label="Presión Diferencial"
                 value={latestSample.pressure.toFixed(2)}
                 unit="Pa"
+                compact={compact}
               />
               <Metric
                 label="Temperatura Ambiente"
                 value={latestSample.temperature.toFixed(1)}
                 unit="°C"
+                compact={compact}
               />
             </div>
             <div style={{ display: "flex", gap: 10 }}>
@@ -181,7 +185,7 @@ export default function LiveWaveform({
             </div>
           </div>
         </div>
-        <canvas ref={canvasRef} style={styles.canvas} />
+        <canvas ref={canvasRef} style={{ ...styles.canvas, ...(compact ? mobile.canvas : null) }} />
       </section>
     </>
   );
@@ -193,15 +197,17 @@ function Metric({
   label,
   value,
   unit,
+  compact = false,
 }: {
   label: string;
   value: string;
   unit: string;
+  compact?: boolean;
 }) {
   return (
-    <div style={styles.metricCard}>
-      <div style={styles.metricLabel}>{label}</div>
-      <div style={styles.metricValue}>
+    <div style={{ ...styles.metricCard, ...(compact ? mobile.metricCard : null) }}>
+      <div style={{ ...styles.metricLabel, ...(compact ? mobile.metricLabel : null) }}>{label}</div>
+      <div style={{ ...styles.metricValue, ...(compact ? mobile.metricValue : null) }}>
         {value} <span style={styles.metricUnit}>{unit}</span>
       </div>
     </div>
@@ -464,4 +470,18 @@ const styles: Record<string, CSSProperties> = {
     background: "#ffffff",
     border: `2px solid ${INK}`,
   },
+};
+
+// --- Móvil: la cabecera de la gráfica se apila y el lienzo deja de estirarse
+// (la página hace scroll, así que necesita una altura propia). ---
+const mobile: Record<string, CSSProperties> = {
+  statusCorner: { position: "static", flexWrap: "wrap", gap: 8 },
+  card: { padding: 14, flex: "none" },
+  graphHeader: { flexDirection: "column", alignItems: "stretch", gap: 10, marginBottom: 12 },
+  graphHeaderRight: { flexDirection: "column", alignItems: "stretch", gap: 10 },
+  metrics: { gap: 8 },
+  metricCard: { flex: "1 1 0", minWidth: 0, padding: "7px 10px" },
+  metricLabel: { whiteSpace: "normal" },
+  metricValue: { fontSize: 17 },
+  canvas: { flex: "none", height: "clamp(220px, 42dvh, 420px)" },
 };

@@ -1,6 +1,8 @@
+"use client";
 // Piezas compartidas por la vista en vivo y la de reproducción de una grabación.
 import Link from "next/link";
 import type { CSSProperties } from "react";
+import { useCompact } from "../../lib/useCompact";
 import { ACCENT, INK, MONO, PAPER } from "../../theme";
 
 export function BackLink() {
@@ -13,10 +15,12 @@ export function BackLink() {
 }
 
 export function Stat({ label, value }: { label: string; value: string }) {
+  const compact = useCompact();
+
   return (
-    <div style={styles.stat}>
+    <div style={{ ...styles.stat, ...(compact ? mobile.stat : null) }}>
       <div style={styles.statLabel}>{label}</div>
-      <div style={styles.statValue}>{value}</div>
+      <div style={{ ...styles.statValue, ...(compact ? mobile.statValue : null) }}>{value}</div>
     </div>
   );
 }
@@ -39,8 +43,10 @@ export function Notice({
   detail?: string;
   action?: { href: string; label: string };
 }) {
+  const compact = useCompact();
+
   return (
-    <main style={styles.main}>
+    <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <BackLink />
       <div style={styles.notice}>
         <p style={styles.noticeTitle}>{title}</p>
@@ -221,4 +227,37 @@ export const styles: Record<string, CSSProperties> = {
     letterSpacing: "0.05em",
     textDecoration: "none",
   },
+};
+
+// --- Móvil: mismas piezas, sin alturas fijas y con la barra de métricas en
+// dos columnas. Lo comparten la vista en vivo y la de reproducción. ---
+export const mobile: Record<string, CSSProperties> = {
+  main: {
+    height: "auto",
+    minHeight: "100%",
+    overflow: "visible",
+    padding: "14px 14px 22px",
+    gap: 12,
+  },
+  header: { paddingRight: 0, paddingBottom: 10 },
+  title: { fontSize: 20 },
+  bar: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+    padding: "12px 14px",
+  },
+  stat: { paddingRight: 0, borderRight: "none", minWidth: 0 },
+  statValue: { fontSize: 16, overflowWrap: "anywhere" },
+  card: {
+    flex: "none",
+    padding: 14,
+    gap: 10,
+    boxShadow: `5px 5px 0 ${INK}`,
+  },
+  cardHeader: { gap: 8 },
+  // Ocupa las dos columnas de la barra de métricas.
+  wide: { gridColumn: "1 / -1" },
+  // Ancho completo y centrado: en el móvil los botones se pulsan, no se apuntan.
+  button: { gridColumn: "1 / -1", marginLeft: 0, justifyContent: "center" },
 };

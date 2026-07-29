@@ -6,11 +6,13 @@ import { MONO } from "../../theme";
 import { getStatus, isRecordingState, stopRecording, type Recording } from "../../lib/api";
 import { useFrontendSocket } from "../../lib/useFrontendSocket";
 import { formatClock, formatTime, recordingName } from "../../lib/format";
-import { BackLink, styles } from "./ui";
+import { useCompact } from "../../lib/useCompact";
+import { BackLink, mobile, styles } from "./ui";
 
 // Vista de la grabación que está en curso ahora mismo (ended_at === null).
 export default function LiveRecordingView({ recording }: { recording: Recording }) {
   const router = useRouter();
+  const compact = useCompact();
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
@@ -63,35 +65,46 @@ export default function LiveRecordingView({ recording }: { recording: Recording 
   };
 
   return (
-    <main style={styles.main}>
+    <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <BackLink />
-      <header style={{ ...styles.header, paddingRight: 260 }}>
+      <header
+        style={{ ...styles.header, paddingRight: 260, ...(compact ? mobile.header : null) }}
+      >
         <div style={liveStyles.badgeRow}>
           <span style={liveStyles.dotOuter}>
             <span style={liveStyles.dotInner} />
           </span>
           <span style={liveStyles.badgeText}>Recording</span>
         </div>
-        <h1 style={styles.title}>{recordingName(recording.started_at)}</h1>
+        <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>
+          {recordingName(recording.started_at)}
+        </h1>
         <p style={styles.subtitle}>Señal en tiempo real de la grabación en curso</p>
       </header>
 
-      <div style={styles.bar}>
-        <div style={styles.stat}>
+      <div style={{ ...styles.bar, ...(compact ? mobile.bar : null) }}>
+        <div style={{ ...styles.stat, ...(compact ? mobile.stat : null) }}>
           <div style={styles.statLabel}>Empezó a las</div>
-          <div style={styles.statValue}>{formatTime(new Date(recording.started_at))}</div>
+          <div style={{ ...styles.statValue, ...(compact ? mobile.statValue : null) }}>
+            {formatTime(new Date(recording.started_at))}
+          </div>
         </div>
-        <div style={styles.stat}>
+        <div style={{ ...styles.stat, ...(compact ? mobile.stat : null) }}>
           <div style={styles.statLabel}>Duración</div>
-          <div style={styles.statValue}>{formatClock(elapsedSeconds)}</div>
+          <div style={{ ...styles.statValue, ...(compact ? mobile.statValue : null) }}>
+            {formatClock(elapsedSeconds)}
+          </div>
         </div>
-        {error != null && <span style={liveStyles.error}>{error}</span>}
+        {error != null && (
+          <span style={{ ...liveStyles.error, ...(compact ? mobile.wide : null) }}>{error}</span>
+        )}
         <button
           onClick={handleStop}
           disabled={wsStatus !== "connected" || pending}
           style={{
             ...styles.button,
             ...styles.buttonStop,
+            ...(compact ? mobile.button : null),
             opacity: wsStatus !== "connected" || pending ? 0.5 : 1,
           }}
         >

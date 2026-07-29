@@ -1,13 +1,18 @@
 "use client";
 import type { CSSProperties } from "react";
 import LiveWaveform from "../components/LiveWaveform";
+import { useCompact } from "../lib/useCompact";
 import { PAPER, INK } from "../theme";
 
 export default function RespirationMonitor() {
+  const compact = useCompact();
+
   return (
-    <main style={styles.main}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>Registrador Respiratorio</h1>
+    <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
+      <header style={{ ...styles.header, ...(compact ? mobile.header : null) }}>
+        <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>
+          Registrador Respiratorio
+        </h1>
         <p style={styles.subtitle}>Señal en tiempo real</p>
       </header>
 
@@ -52,4 +57,20 @@ const styles: Record<string, CSSProperties> = {
     color: "#555",
     margin: "4px 0 0 0",
   },
+};
+
+// --- Móvil: la página crece y hace scroll, y el badge de estado deja de ir
+// flotando en la esquina (por eso la rejilla pasa a columna). ---
+const mobile: Record<string, CSSProperties> = {
+  main: {
+    display: "flex",
+    flexDirection: "column",
+    height: "auto",
+    minHeight: "100%",
+    overflow: "visible",
+    padding: "16px 14px 22px",
+    gap: 12,
+  },
+  header: { paddingRight: 0, paddingBottom: 10 },
+  title: { fontSize: 20 },
 };

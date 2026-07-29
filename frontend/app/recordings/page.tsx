@@ -11,6 +11,7 @@ import {
   stopRecording,
   type Recording,
 } from "../lib/api";
+import { useCompact } from "../lib/useCompact";
 import { useFrontendSocket, type WsStatus } from "../lib/useFrontendSocket";
 import {
   durationSeconds,
@@ -22,6 +23,7 @@ import {
 } from "../lib/format";
 
 export default function RecordingsPage() {
+  const compact = useCompact();
   const [measuring, setMeasuring] = useState(false);
   // active != null <=> hay una grabación en curso (la que no tiene ended_at).
   const [active, setActive] = useState<Recording | null>(null);
@@ -104,14 +106,14 @@ export default function RecordingsPage() {
   const history = recordings.filter((r) => r.id !== active?.id);
 
   return (
-    <main style={styles.main}>
+    <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <header style={styles.header}>
-        <h1 style={styles.title}>Grabaciones</h1>
+        <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>Grabaciones</h1>
         <p style={styles.subtitle}>Historial de sesiones respiratorias</p>
       </header>
 
-      <div style={styles.split}>
-        <div style={styles.topPane}>
+      <div style={{ ...styles.split, ...(compact ? mobile.split : null) }}>
+        <div style={{ ...styles.topPane, ...(compact ? mobile.topPane : null) }}>
           {active != null ? (
             <RecordingNowPanel
               active={active}
@@ -132,7 +134,7 @@ export default function RecordingsPage() {
           )}
         </div>
 
-        <div style={styles.bottomPane}>
+        <div style={{ ...styles.bottomPane, ...(compact ? mobile.bottomPane : null) }}>
           <div style={styles.listHeader}>
             <div style={styles.listTitleGroup}>
               <span style={styles.listTitleIcon}>
@@ -147,7 +149,7 @@ export default function RecordingsPage() {
             <span style={styles.tableHeadCell}>Grabación</span>
             <span style={styles.tableHeadCellRight}>Duración</span>
           </div>
-          <div style={styles.rows}>
+          <div style={{ ...styles.rows, ...(compact ? mobile.rows : null) }}>
             {history.length === 0 ? (
               <div style={styles.empty}>
                 <span style={styles.emptyIcon}>
@@ -178,12 +180,13 @@ function NewRecordingPanel({
   error: string | null;
   onStart: () => void;
 }) {
+  const compact = useCompact();
   const [hovered, setHovered] = useState(false);
   const disabled = wsStatus !== "connected" || pending;
   const hover = hovered && !disabled;
 
   return (
-    <div style={styles.idlePanel}>
+    <div style={{ ...styles.idlePanel, ...(compact ? mobile.idlePanel : null) }}>
       <ConnectionBadge status={wsStatus} />
       <button
         onClick={onStart}
@@ -192,6 +195,7 @@ function NewRecordingPanel({
         onMouseLeave={() => setHovered(false)}
         style={{
           ...styles.newButton,
+          ...(compact ? mobile.newButton : null),
           border: hover ? `3px solid ${ACCENT}` : `3px solid ${INK}`,
           boxShadow: hover ? `6px 6px 0 ${ACCENT}` : `6px 6px 0 ${INK}`,
           transform: hover ? "translate(-2px, -2px)" : "none",
@@ -234,8 +238,10 @@ function RecordingNowPanel({
   error: string | null;
   onStop: () => void;
 }) {
+  const compact = useCompact();
+
   return (
-    <div style={styles.livePanel}>
+    <div style={{ ...styles.livePanel, ...(compact ? mobile.livePanel : null) }}>
       <div style={styles.liveHeaderRow}>
         <div style={styles.liveTitleGroup}>
           <span style={styles.recDot} />
@@ -251,28 +257,46 @@ function RecordingNowPanel({
       </div>
 
       <div style={styles.liveMetrics}>
-        <div style={styles.liveMetric}>
+        <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
           <div style={styles.metricLabel}>Started</div>
-          <div style={styles.metricValueLg}>{formatTime(new Date(active.started_at))}</div>
+          <div style={{ ...styles.metricValueLg, ...(compact ? mobile.metricValueLg : null) }}>
+            {formatTime(new Date(active.started_at))}
+          </div>
         </div>
-        <div style={styles.liveMetric}>
+        <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
           <div style={styles.metricLabel}>Duration</div>
-          <div style={styles.metricValueLg}>{formatClock(elapsedSeconds)}</div>
+          <div style={{ ...styles.metricValueLg, ...(compact ? mobile.metricValueLg : null) }}>
+            {formatClock(elapsedSeconds)}
+          </div>
         </div>
-        <div style={styles.liveMetric}>
+        <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
           <div style={styles.metricLabel}>Nombre</div>
-          <div style={styles.metricValueSm}>{recordingName(active.started_at)}</div>
+          <div style={{ ...styles.metricValueSm, ...(compact ? mobile.metricValueSm : null) }}>
+            {recordingName(active.started_at)}
+          </div>
         </div>
       </div>
 
       <div style={styles.liveActions}>
-        <Link href={`/recordings/${active.id}`} style={{ ...styles.actionBtn, ...styles.actionBtnGhost }}>
+        <Link
+          href={`/recordings/${active.id}`}
+          style={{
+            ...styles.actionBtn,
+            ...styles.actionBtnGhost,
+            ...(compact ? mobile.actionBtn : null),
+          }}
+        >
           Live View
         </Link>
         <button
           onClick={onStop}
           disabled={pending}
-          style={{ ...styles.actionBtn, ...styles.actionBtnStop, opacity: pending ? 0.6 : 1 }}
+          style={{
+            ...styles.actionBtn,
+            ...styles.actionBtnStop,
+            ...(compact ? mobile.actionBtn : null),
+            opacity: pending ? 0.6 : 1,
+          }}
         >
           Stop
         </button>
@@ -285,6 +309,7 @@ function RecordingNowPanel({
 // --- Fila de grabación ---
 
 function RecordingRow({ recording }: { recording: Recording }) {
+  const compact = useCompact();
   const [hover, setHover] = useState(false);
   const date = new Date(recording.started_at);
   const seconds = durationSeconds(recording.started_at, recording.ended_at);
@@ -303,9 +328,9 @@ function RecordingRow({ recording }: { recording: Recording }) {
       <div style={styles.rowIcon}>
         <WaveIcon />
       </div>
-      <div style={styles.rowMain}>
+      <div style={{ ...styles.rowMain, ...(compact ? mobile.rowMain : null) }}>
         <span style={styles.rowName}>{recordingName(recording.started_at)}</span>
-        <span style={styles.rowMeta}>
+        <span style={{ ...styles.rowMeta, ...(compact ? mobile.rowMeta : null) }}>
           {formatRelativeDate(date)} · {formatTime(date)} · {formatNumber(recording.samples)}{" "}
           muestras
         </span>
@@ -720,4 +745,37 @@ const styles: Record<string, CSSProperties> = {
     height: 36,
     border: "2px dashed rgba(17,17,17,0.3)",
   },
+};
+
+// --- Móvil: nada de alturas fijas ni de dos paneles repartiéndose la pantalla;
+// la página entera hace scroll y el historial crece hacia abajo. ---
+const mobile: Record<string, CSSProperties> = {
+  main: {
+    height: "auto",
+    minHeight: "100%",
+    overflow: "visible",
+    padding: "16px 14px 22px",
+    gap: 14,
+  },
+  title: { fontSize: 20 },
+  split: { flex: "none", gap: 14 },
+  topPane: { flex: "none" },
+  bottomPane: {
+    height: "auto",
+    boxShadow: `4px 4px 0 ${INK}`,
+    padding: "14px 14px 4px",
+  },
+  rows: { flex: "none", overflowY: "visible" },
+
+  idlePanel: { padding: "26px 16px", gap: 14 },
+  newButton: { padding: "14px 20px", fontSize: 13, textAlign: "center" },
+
+  livePanel: { padding: "18px 16px", gap: 16, boxShadow: `5px 5px 0 ${INK}` },
+  liveMetric: { flex: "1 1 130px", padding: "8px 12px" },
+  metricValueLg: { fontSize: 19 },
+  metricValueSm: { fontSize: 13, marginTop: 6 },
+  actionBtn: { flex: "1 1 140px", padding: "13px 14px", textAlign: "center" },
+
+  rowMain: { flexDirection: "column", alignItems: "flex-start", gap: 2 },
+  rowMeta: { whiteSpace: "normal" },
 };
