@@ -22,9 +22,12 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
   const [error, setError] = useState<string | null>(null);
   const compact = useCompact();
   // La tarjeta entera es lo que se va a pantalla completa: así el título y el
-  // botón de salir siguen ahí dentro.
+  // botón de salir siguen ahí dentro. En el móvil, además, en horizontal: en
+  // vertical la gráfica queda demasiado estrecha para leer nada.
   const cardRef = useRef<HTMLElement>(null);
-  const { active: fullscreen, toggle: toggleFullscreen } = useFullscreen(cardRef);
+  const { active: fullscreen, toggle: toggleFullscreen } = useFullscreen(cardRef, {
+    landscape: compact,
+  });
 
   // page.tsx monta este componente con key={id}, así que al cambiar de grabación
   // se remonta y el estado arranca limpio: aquí sólo hace falta pedir el CSV.
