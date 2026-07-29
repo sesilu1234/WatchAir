@@ -246,3 +246,14 @@ menos poner la ESP32 con los separators en la caja:
 lector como para yo recordar qué tengo y qué hay.
 
 ### H3. ___
+
+
+
+
+### I.
+
+        - El eje Y , quizas mejor : Rango fijo y simétrico: min: -M, max: +M con M = max(|min|,|max|) · 1.05. El cero queda clavado en el centro y las amplitudes pasan a ser comparables. Sale casi gratis: ya recorremos todos los puntos en describe() para las estadísticas. Además queda coherente con la vista en vivo, que siempre pinta la base en el centro del lienzo.
+
+        comprobar que opcion de grafica queda mejor, ahora marea un poco y no te aclaras.
+
+        - Que en la grafica, me parece muy util y satisfactorio que : aparezca el rango de tiempo (conteo de minutos /segundos, que se está viendo)
