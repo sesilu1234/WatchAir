@@ -1,9 +1,15 @@
 // Cliente del backend FastAPI: comandos por HTTP, datos en vivo por WebSocket.
 // Una grabación se identifica por su UUID (el que devuelve /recording/start).
-const API_HOST = process.env.NEXT_PUBLIC_API_HOST ?? "13.48.132.12:8000";
+//
+// NEXT_PUBLIC_API_URL lleva el esquema incluido y sin barra final, p.ej.
+// "https://watchair.duckdns.org". El esquema importa: una página servida por
+// https no puede abrir ws:// ni http:// (mixed content), así que en cuanto el
+// frontend esté desplegado el backend tiene que ser https + wss.
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://13.48.132.12:8000";
 
-export const API_BASE = `http://${API_HOST}`;
-export const WS_FRONTEND_URL = `ws://${API_HOST}/frontend`;
+export const API_BASE = API_URL.replace(/\/$/, "");
+// http -> ws, https -> wss.
+export const WS_FRONTEND_URL = `${API_BASE.replace(/^http/, "ws")}/frontend`;
 
 // Fila de la tabla `recordings`. ended_at === null <=> se está grabando ahora.
 export type Recording = {

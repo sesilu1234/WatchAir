@@ -1,31 +1,27 @@
-- mover Hz de ESP32. 10Hz ahora pero se propone quiza 25Hz incluso
+# WatchAir — TODO
 
-- cuidado con cojas que se queden colgando : esp32 sin grabar , o grabaanaaado...grabaaacion que no aacaabaaa nunca. o se queda pillao el servidor , ui, o esp32 pensanado que esta grabando y no...etc
-
-- cosas tipo : que la esp32 si pierde wifi, pues guarde datos en local buffer y envie
-
-servidor aal iniciar siempre verifique si quedaa muerto aalguna recording con time:ended NULL (es malo porque el usuario no podria iniciar nnueva grabacion)
-
-pensar escenaario sy hacer pruebas
-
-- miraa cachos poroblemas pueden ocurrir que dejen inutilizable el sensor :
-
-INFO: 139.47.103.9:58725 - "POST /sensor/stop HTTP/1.1" 409 Conflict
-
-Diagnosed conflict state and prescribed prerequisite action
-Diagnosed conflict state and prescribed prerequisite action
-Eso es la guarda funcionando como debe: has intentado parar el sensor mientras hay una grabación en curso, y el servidor lo bloquea para que no cortes la grabación sin querer.
-
-Comprueba el estado:
+Principio general que atraviesa casi todo lo de abajo:
+**nada puede quedarse colgando.** Ni la ESP32 midiendo sin que el server lo sepa,
+ni una grabación que no acaba nunca, ni el server/UI creyendo que se está grabando
+cuando no. Pensar los escenarios y hacer pruebas de cada uno.
 
 
+## A. Bugs / cambios a hacer ya
 
+### A1. Revertir el cierre de grabación en el `finally` del WS /sensor  ⚠️ URGENTE
+El cambio peligroso, y este sí lo revertiría YA: en el `finally` del WS `/sensor`,
+si la ESP32 se desconecta, cierra la grabación en curso.
 
-- El cambio peligroso, y este sí lo revertiría YA:
+Piensa en el caso de uso real: estás durmiendo, el router parpadea 3 segundos a las
+2 AM, el WS se cae, la ESP32 reconecta sola (para eso pusimos el `setReconnectInterval`
+y el watchdog)... y el server ya ha matado la grabación de la noche. Te despiertas con
+2 horas grabadas en vez de 8. Es exactamente lo contrario de lo que el sistema debe hacer.
 
-En el finally del WS /sensor: si el ESP32 se desconecta, cierra la grabación en curso. Piensa en tu caso de uso real: estás durmiendo, el router parpadea 3 segundos a las 2 AM, el WS se cae, el ESP32 reconecta solo (para eso pusimos el setReconnectInterval y el watchdog)... y el server ya ha matado la grabación de la noche. Te despiertas con 2 horas grabadas en vez de 8. Es exactamente lo contrario de lo que el sistema debe hacer. Lo correcto: la grabación sobrevive a las caídas del sensor (queda un hueco en los datos, que además es información diagnóstica), y la huérfana solo se cierra en el arranque del server, como ya teníamos. Sustituye el final del endpoint por:
+Lo correcto: **la grabación sobrevive a las caídas del sensor** (queda un hueco en los
+datos, que además es información diagnóstica), y **la huérfana solo se cierra en el
+arranque del server**, como ya teníamos.
 
-python
+```python
 @app.websocket("/sensor")
 async def sensor(ws: WebSocket):
     await manager.connect_sensor(ws)
@@ -41,194 +37,212 @@ async def sensor(ws: WebSocket):
             # recording survives sensor dropouts: the gap in the data is
             # itself useful info; orphans are only closed at server startup
             log.warning("ESP32 dropped during recording %s; keeping it open", recorder.rec_id)
+```
 
+### A2. Barrido de grabaciones huérfanas al arrancar el server
+El servidor, al iniciar, siempre verifica si queda muerta alguna recording con
+`ended_at = NULL`. Es malo porque el usuario no podría iniciar una nueva grabación.
 
+Cubre también las caídas del server o cualquier reset: en principio si crashea se queda
+guardado lo que había, así que no hay que hacer nada más — simplemente al iniciar, poner
+`ended_at` al que no lo tenga (con `now()` o calculándolo a partir de las muestras).
 
+Es el otro extremo de A1: si las huérfanas solo se cierran aquí, este barrido tiene que
+funcionar sí o sí.
 
-- ver quien es responsable de que vaya a tirones
--conteo de hora esta mal creo o empieza el numero un plein mal un momento
+### A3. El conteo de la hora está mal
+Creo que empieza el número un pelín mal un momento.
 
+### A4. Subir la frecuencia de la ESP32
+Ahora 10 Hz. Se propone quizá 25 Hz, incluso.
 
 
+## B. La señal: que llegue bien y se pinte bien
 
+### B1. Muestras a trompicones — ¿de quién es el fallo?
+Ver quién es el responsable de que vaya a tirones, y decidir si se soluciona de alguna
+manera o se pinta de otra manera.
 
-            -Un matiz menor que te dejo apuntado: manager.measuring se pone a False en cada reconexión del ESP32, pero si el sensor estaba midiendo y solo se cayó el WS, seguirá midiendo sin que el server lo sepa (el firmware solo reporta estado al recibir start/stop). El /status puede mentir ahí. La solución es que el firmware reporte su estado al conectar el WS — que es justo lo que te propuse en su día y me hiciste quitar, jaja. Cuando quieras lo recuperamos.
+### B2. El eje X es índice, no `t`
+Esto es crucial para ver que se está viendo bien la respiración: que no esté ni más ni
+menos achatada ni nada. Y que en el fichero de la grabación sí se esté guardando bien el
+timestamp, aunque al pintar no.
 
+El buffer guarda solo `sample.p` (la `t` se tira), y luego
+`x = i / (data.length - 1) * plotWidth` — espaciado uniforme por orden de llegada.
+Es exactamente la forma naive: si el WiFi entrega a ráfagas, esos puntos se pintan
+equiespaciados igualmente, **comprimiendo y estirando el tiempo**. A 20 Hz estables no se
+nota; con jitter, la forma de onda miente.
 
+Arreglo: guardar `{t, p}` en el buffer y mapear `x` desde `t`.
 
+### B3. Huecos por desconexión en la gráfica
+Si ha habido una caída, y después se reconecta al wifi y reanuda las measures, la gráfica
+quedará rara. Habrá un hueco entre la última medida antes de la caída y la primera a partir
+de la reconexión, que hay que rellenar señalándolo con algún color o algo, con un algoritmo
+que ___
 
+(Si no llega a haber más measures en ningún momento, la gráfica queda bien, aunque diría
+`ended_at` en un momento distinto... en verdad en ese caso se puede pintar la gráfica hasta
+`ended_at`, quizás.)
 
-- esto es crucial para ver que se esta viendo bien la repsiracion :  no este ni mas ni menos achatada ni nada. y que en file grabacion sí que este guardando bien timestamp aunque pintando no :  
- 
-  Ahora, mirando el código me he encontrado dos cosas que sí te van a interesar más que el rerender:
 
-1. El eje X es índice, no t. Mira: el buffer guarda solo sample.p (el t se tira), y luego x = i / (data.length - 1) * plotWidth — espaciado uniforme por orden de llegada. Es exactamente la forma naive de la que hablamos hace tres mensajes: si el WiFi entrega a ráfagas, esos puntos se pintan equiespaciados igualmente, comprimiendo y estirando el tiempo. A 20 Hz estables no se nota; con jitter, la forma de onda miente. El arreglo es el que ya sabes: guardar {t, p} en el buffer y mapear x desde t. Es el cambio que le pediría a Claude Code.
+## C. Máquina de estados: sensor y grabación
 
+### C1. La fuente de verdad de "hay grabación en curso" es `self.recording`
+Que la manera de comprobar si hay una grabación en curso sea `self.recording`, **no** mirar
+en la database.
 
+Si sí hay recording, que devuelva los datos de la grabación mirando en la base de datos
+(o quizás mejor directamente la info, si hay suficiente, en el server).
 
+### C2. Secuencia de start / stop
+- Solo empiezo la recording una vez tengo el check response de haber hecho el insert en la
+  base de datos con el uuid para la grabación.
+- Al empezar a grabar, **siempre poner el sensor a on primero**. Cuando empieza una recording,
+  también envía un `start` a la ESP32 siempre; y un stop de recording envía un `stop` a la ESP32.
+- Al parar la grabación sí que es verdad que es bueno que el sensor se ponga a stop.
+- Parar una recording, en este orden:
+  1. `self.recording = False`
+  2. `if file name:` cerrar streaming, save file, `self.name = None`
+  3. poner `ended_at = now()` para el `self.uuid`
 
+### C3. No se puede parar el sensor con una grabación en curso
+Si hay una recording en proceso, no se puede parar la ESP32 — mientras `self.recording = True`
+no se admite stop del sensor. La manera de parar el sensor es parar antes la recording (C2).
 
+Esto ya está funcionando. Cuando ves:
 
+```
+INFO: 139.47.103.9:58725 - "POST /sensor/stop HTTP/1.1" 409 Conflict
+```
 
+eso es la guarda funcionando como debe: has intentado parar el sensor mientras hay una
+grabación en curso, y el servidor lo bloquea para que no cortes la grabación sin querer.
+Ante la duda, comprueba el estado.
 
+### C4. `manager.measuring`: ¿tiene sentido?
+`manager.measuring` se pone a `False` en cada reconexión de la ESP32, pero si el sensor
+estaba midiendo y solo se cayó el WS, **seguirá midiendo sin que el server lo sepa** (el
+firmware solo reporta estado al recibir start/stop). El `/status` puede mentir ahí.
 
+La solución es que el firmware reporte su estado al conectar el WS — que es justo lo que se
+propuso en su día y me hiciste quitar, jaja. Cuando quieras lo recuperamos.
 
-1. revisar de quien es el fallo de que muestras lleguen a trompicones...y ver si solucionarlo de alguna manera o pintar de otra manera
+Alternativa que me convence más: quitarlo. O quizás sí sirve y solo replica el `measuring`
+de la ESP32 (tendría que estar siempre replicado)... pero no, mejor no, por las desconexiones
+de la ESP32. Simplemente: o recibe measures por websocket o no, ya está.
 
+Ojo con el matiz: eso no tiene sentido del todo porque entonces, si está en stop, aparecería
+como desconectado. Entonces sería con ping — pero ni hace falta: simplemente con que la
+variable global de la ESP32 esté, ya vale.
 
-2. cuando esta en start, que aparezca en start automaticamente en real-time/live-view
+### C5. Card de "ESP32 conectada" en el frontend
+Hacer ping cada 5 seg o algo así (menos) en el frontend para ver y actualizar la card de si
+la ESP32 está conectada. Ahora mismo esto solo está diciendo "conectado" por estar conectado
+al server, no si la ESP32 lo está. (Ver C4: quizás basta la variable global del server.)
 
 
-3. hacer ping cada 5 seg o algo asi (menos) en frontend para ver y actualizar card de si esp32 esta conectado ? (aunque en verdad esto ahora mismo esta solo diciendo conectado con estar conectado al server, no si la esp32 está conectada)
+## D. Qué pasa cuando algo se cae
 
+### D1. Pérdida de WiFi en la ESP32 — dos opciones sobre la mesa
+- **Opción buffer:** que la ESP32, si pierde el wifi, guarde datos en un buffer local y los
+  envíe al reconectar.
+- **Opción parar:** en la ESP32, poner que si pierde la conexión WS, deje de hacer mediciones.
 
-4. que la manera de comrpobar si hay una grabacion en curso sea el self.recording ( no ver en la database) 
+### D2. Reset de la ESP32 → `millis()` vuelve a 0
+Cuando el servidor recibe una muestra, el timestamp lo pone la ESP32. Si se desconectara de
+la luz, después empezaría `millis` a 0 y descuadraría todos los datos.
 
- ( si sí recording, pues que devuelva los datos de la grabacion mirando en base de datos ( o quizas mejor directament la info, si hay suficiente, en server))
+¿Que el timestamp lo ponga el server? No, porque si tarda el wifi de la ESP32 al server,
+entonces que lo ponga el server no es reliable en absoluto.
 
+Simplemente: si se desconecta la ESP32, se da la recording por finalizada y el usuario se
+jode, ajo y agua. Pero **esto tiene que detectarse bien**: si el server no lo detecta y la
+ESP32 se reconecta súper rápido pero con `millis` a 0... pues la grabación queda mal y no se
+guarda nada.
 
-            y que parar la recording sea primero 
+Quizás para esto: cuando la ESP32 se reencienda y conecte al wifi, lo primero que hace es
+decir *"hey the fella is back on business"*, y eso quiere decir que se ha reseteado — porque
+el programa empieza y por tanto `millis` está a 0.
 
+Por eso es bueno que el aparato tenga batería propia. Y además, que no deje empezar una
+grabación si no tiene batería para 2 horas por lo menos (¿o esto no, quizás?).
 
+### D3. Sensor desconectado / roto / I2C fallando
+También puede ocurrir que el sensor se desconecte, o esté roto, o el I2C vaya mal. En ese
+caso: ___
 
+### D4. Caídas del server
+Ver A2 — no hace falta nada más.
 
 
+## E. Frontend / UX
 
+### E1. Que al hacer start aparezca automáticamente en start en real-time / live-view.
 
+### E2. Botón de opciones para las grabaciones, uno de ellos delete. También ponerlo en la
+página de la grabación.
 
+### E3. Opción de pantalla completa en la gráfica de la recording. ¿Quizás la librería lo hace
+automático y fácil?
 
+### E4. Móvil.
 
+### E5. Máximo por grabación: que se pare sí o sí a las 12 horas... ¿o quizás más? Para un
+crackero o metanfetaminero o alguien con hipersomnia, ¿+20 horas? jajaja
 
 
-            5. hacer prueba yo respirando y respirando poco y tal y viendo si las curvas que dibuja son accurate y sirve (perfectamente) para claramente ver que pasa y como es mi respiracion (cortes, limitacion de flujo, etc...) 
+## F. Métricas de la página de grabación
 
-            eso en condiciones normales. pero tambien ver que pasa si presiono el cable , o esta un poco enredao ... y si sigue cogiendose, pero hay una diferencia en rango e intensidad y altura de la curva
+Baratas de calcular, para ya:
+- Tiempo grabado
+- Fecha de finalización
+- Sensor (SDP810)
+- 0 eventos (por ahora)
+- Tiempo en cada rango:
 
-            y tambien ver como varia si no tengo super bien colocada la canula
-
-
-
-            6. ver si me lo puedo poner noche entera asi suelto...aunque quiza mejor la verdad, por lo menos poner la esp32 con los separators en la caja (ver de ponerlo justo en sitio para que despues sensor quede bien. y ponerlo en sitio donde se pueda desde fuera poner el usb (quizas sacar un pelin el usb o igual eso no es pro...simplemente que queda super bien ajustado))  ( y comprobar que wifi vaya bien encapsulado...)
-
-
-
-
-
-        7. 
-        solo empiezo recording, una vez tengo el check response de haber hecho insert in base datos con uuid para grabacion
-
-        cuando empieza una recoding, tambien envia un start a la esp32 siempre. y un stop recording envia un stop a la esp32
-        
-        que si hay una recording en proceso, no se pueda parar el esp32 . la manera de parar una recording es primero parar self.recording 
-        self.recording = False  
-        despues, if file name , cerrar streaming, save file, y self.name = None
-        y poner ended_at en now() para el self.uuid,
-
-
-
-
-8. poner boton de opciones para grabaciones, uno de ellos delete. tambien ponerlo en la pagina de la grabacion
-
-
-
-9. poner un max para cada cada grabacion, que se pare si o si a las 12 horas...o quizas mas ? para un crackero o metamfetaminero o hipersomnia necesita +20 horas ? jajaja
-
-
-
-10. en grafica de recording, poner opcion de pantalla completa  ? quizas la libreria lo hace automatico facil ? 
-
-
-
-
-11 . Tiempo grabado
-Fecha de finalización
-Sensor (SDP810)
-0 eventos (por ahora)
-4. Tiempo en cada rango
-
+```
 -300 a -200 Pa   ███ 4%
 -200 a -100 Pa   ███████ 12%
 -100 a 0 Pa      █████████████ 48%
 0 a 100 Pa       ████████ 30%
 100+ Pa          ██ 6%
+```
 
-Muy barato de calcular.
-
-
-
-
-Número de respiraciones (cuando implementes detección)
-Respiraciones/min
-I:E medio (inspiración/espiración)
-Duración media de respiración
+Cuando implementes detección de respiraciones:
+- Número de respiraciones
+- Respiraciones/min
+- I:E medio (inspiración/espiración)
+- Duración media de respiración
 
 
+## G. Pruebas reales y hardware
+
+### G1. Prueba de respiración
+Hacer prueba yo respirando, y respirando poco, y tal, y viendo si las curvas que dibuja son
+accurate y sirven (perfectamente) para ver claramente qué pasa y cómo es mi respiración
+(cortes, limitación de flujo, etc.).
+
+Eso en condiciones normales. Pero también:
+- Ver qué pasa si presiono el cable, o está un poco enredado: ¿se sigue cogiendo? ¿hay una
+  diferencia en rango, intensidad y altura de la curva?
+- Ver cómo varía si no tengo súper bien colocada la cánula.
+
+### G2. Montaje para la noche entera
+Ver si me lo puedo poner la noche entera así suelto... aunque quizá mejor, la verdad, por lo
+menos poner la ESP32 con los separators en la caja:
+- Colocarla justo en el sitio para que después el sensor quede bien.
+- Ponerla donde se pueda enchufar el USB desde fuera (quizás sacar un pelín el USB, o igual
+  eso no es pro... simplemente que quede súper bien ajustado).
+- Comprobar que el wifi vaya bien encapsulado.
 
 
+## H. Varios
 
-12. en readme o algun otro sitio, documentar bien todo lo hecho. tanto para lector como para mi recordar que tengo y qué hay
+### H1. Leer los códigos para ver, saber y comprobar.
 
+### H2. En el README o en algún otro sitio, documentar bien todo lo hecho — tanto para un
+lector como para yo recordar qué tengo y qué hay.
 
-13. movil
-
-
-14. manager.measuring no se si tiene sentido ? o quizas sí y solo replica (aunque tiene que estar siempre replicado , al mesauring de la esp32)...na mejor no, por desconexiones de la esp32...simplemente o recibe por webscoket measures de esp32 o no, ya esta...
-
-eso no tiene sentido porque entonces si está en stop , aparecería como desonectado (entonces seria con ping, pero ni hace falta, simplemente con que la global variable esp32 esté ya vale)
-
-
-
-15. leer los codigos para ver , saber, comprobar
-
-
-
-16. en esp32, poner que si pierde conexion WS, deje de hacer mediciones
-
-
-
-17. al empezar a grabar, siempre poner a on primero, y despues no se puede stop mientras haya self.recording = True. al parar grabacion sí que es verdad que es bueno que se ponga a stop
-
-
-
-18. cuando recibe muestra el servidor, el timestamp lo pone esp32. si se desconectara de la luz, despues empezaria milis a 0 y descuadraria todos los datos. quizas mejor que el timestamp lo ponga el server ...o no porque si tarda el wifi de esp32 a server, entonces que lo haga server no es reliable en absoluto. simplemente si se desconecta esp32, se da la recording por finalizada y el usuario se jode ajo y agua     (y tiene que detectar que detectarse bien esto...si el server no lo detecta y esp32 se reconecta super rapido pero mills a 0 ... pues mal la grabacion y no se guarda nada)
-
-es bueno que el aparato tenga bateria propia por tanto...y ademas no deje empezar grabacion si no tiene bateria para 2 horas por lo menos ( o esto no quizas... ? )
-
-
-
-quizas para esto , cuando se reencienda, y conecte al wifi, lo primero que hace es decir 'hey the fella is back on business' , y eso quiere decir que se reseteado porque el programa empieza y por tanto milis a 0
-
-
-19.  tambien puede ocurrir que sensor se desconecte o roto o i2c vaya mal, en ese caso : 
-
-
-
-
-
-
-
-
-20. para grabacion, si ha habido caida de desconexion , entonces si despues se reconecta a wifi y reanuda las measures, la grafica quedará rara...(si no llega a haber mas measures  en nignun momento la grafica queda bien, aunque diria ended_at en un momento distinto...en verdad en este caso se puede poner la grafica hasta ended_at quizas)
-
- habra un hueco entre medida ultima antes de caida y la medida primera apartir de reconexion, que hay que rellenar señalando con algun color o algo , con un algoritmo que 
-
-
-
-
-
-
-21. respecto a caidas del server o algun reset en algun momento: 
-
-
-nada. en principio si crashea se queda guardado lo que habia. simplemente al inicar, poner ended_at el que no lo tenga (con now() o calculando con las muestras)
-
-22.       
-
-
-
-
-
-
-
-
-
+### H3. ___
