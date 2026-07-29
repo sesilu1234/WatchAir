@@ -53,3 +53,117 @@ async def sensor(ws: WebSocket):
 
 
             -Un matiz menor que te dejo apuntado: manager.measuring se pone a False en cada reconexión del ESP32, pero si el sensor estaba midiendo y solo se cayó el WS, seguirá midiendo sin que el server lo sepa (el firmware solo reporta estado al recibir start/stop). El /status puede mentir ahí. La solución es que el firmware reporte su estado al conectar el WS — que es justo lo que te propuse en su día y me hiciste quitar, jaja. Cuando quieras lo recuperamos.
+
+
+
+
+
+- esto es crucial para ver que se esta viendo bien la repsiracion :  no este ni mas ni menos achatada ni nada. y que en file grabacion sí que este guardando bien timestamp aunque pintando no :  
+ 
+  Ahora, mirando el código me he encontrado dos cosas que sí te van a interesar más que el rerender:
+
+1. El eje X es índice, no t. Mira: el buffer guarda solo sample.p (el t se tira), y luego x = i / (data.length - 1) * plotWidth — espaciado uniforme por orden de llegada. Es exactamente la forma naive de la que hablamos hace tres mensajes: si el WiFi entrega a ráfagas, esos puntos se pintan equiespaciados igualmente, comprimiendo y estirando el tiempo. A 20 Hz estables no se nota; con jitter, la forma de onda miente. El arreglo es el que ya sabes: guardar {t, p} en el buffer y mapear x desde t. Es el cambio que le pediría a Claude Code.
+
+
+
+
+
+
+
+
+
+
+1. revisar de quien es el fallo de que muestras lleguen a trompicones...y ver si solucionarlo de alguna manera o pintar de otra manera
+
+
+2. cuando esta en start, que aparezca en start automaticamente en real-time/live-view
+
+
+3. hacer ping cada 5 seg o algo asi (menos) en frontend para ver y actualizar card de si esp32 esta conectado ? (aunque en verdad esto ahora mismo esta solo diciendo conectado con estar conectado al server, no si la esp32 está conectada)
+
+
+4. que la manera de comrpobar si hay una grabacion en curso sea el self.recording ( no ver en la database) 
+
+ ( si sí recording, pues que devuelva los datos de la grabacion mirando en base de datos ( o quizas mejor directament la info, si hay suficiente, en server))
+
+
+            y que parar la recording sea primero 
+
+
+
+
+
+
+
+
+
+
+
+
+            5. hacer prueba yo respirando y respirando poco y tal y viendo si las curvas que dibuja son accurate y sirve (perfectamente) para claramente ver que pasa y como es mi respiracion (cortes, limitacion de flujo, etc...) 
+
+            eso en condiciones normales. pero tambien ver que pasa si presiono el cable , o esta un poco enredao ... y si sigue cogiendose, pero hay una diferencia en rango e intensidad y altura de la curva
+
+            y tambien ver como varia si no tengo super bien colocada la canula
+
+
+
+            6. ver si me lo puedo poner noche entera asi suelto...aunque quiza mejor la verdad, por lo menos poner la esp32 con los separators en la caja (ver de ponerlo justo en sitio para que despues sensor quede bien. y ponerlo en sitio donde se pueda desde fuera poner el usb (quizas sacar un pelin el usb o igual eso no es pro...simplemente que queda super bien ajustado))  ( y comprobar que wifi vaya bien encapsulado...)
+
+
+
+
+
+        7. 
+        solo empiezo recording, una vez tengo el check response de haber hecho insert in base datos con uuid para grabacion
+
+        cuando empieza una recoding, tambien envia un start a la esp32 siempre. y un stop recording envia un stop a la esp32
+        
+        que si hay una recording en proceso, no se pueda parar el esp32 . la manera de parar una recording es primero parar self.recording 
+        self.recording = False  
+        despues, if file name , cerrar streaming, save file, y self.name = None
+        y poner ended_at en now() para el self.uuid,
+
+
+
+
+8. poner boton de opciones para grabaciones, uno de ellos delete. tambien ponerlo en la pagina de la grabacion
+
+
+
+9. poner un max para cada cada grabacion, que se pare si o si a las 12 horas...o quizas mas ? para un crackero o metamfetaminero o hipersomnia necesita +20 horas ? jajaja
+
+
+
+10. en grafica de recording, poner opcion de pantalla completa  ? quizas la libreria lo hace automatico facil ? 
+
+
+
+
+11 . Tiempo grabado
+Fecha de finalización
+Sensor (SDP810)
+0 eventos (por ahora)
+4. Tiempo en cada rango
+
+-300 a -200 Pa   ███ 4%
+-200 a -100 Pa   ███████ 12%
+-100 a 0 Pa      █████████████ 48%
+0 a 100 Pa       ████████ 30%
+100+ Pa          ██ 6%
+
+Muy barato de calcular.
+
+
+
+
+Número de respiraciones (cuando implementes detección)
+Respiraciones/min
+I:E medio (inspiración/espiración)
+Duración media de respiración
+
+
+
+
+
+12. en readme o algun otro sitio, documentar bien todo lo hecho. tanto para lector como para mi recordar que tengo y qué hay

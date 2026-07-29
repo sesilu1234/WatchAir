@@ -1,8 +1,7 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
-import { isSensorState, startSensor, stopSensor, type SampleMessage } from "../lib/api";
-import { useFrontendSocket, type WsStatus } from "../lib/useFrontendSocket";
+import { WS_FRONTEND_URL, startSensor, stopSensor } from "../lib/api";
 
 const MAX_POINTS = 200;
 
@@ -15,7 +14,9 @@ export default function LiveWaveform({
 } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const samplesBuffer = useRef<number[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
 
+  const [status, setStatus] = useState("connecting");
   const [latestSample, setLatestSample] = useState({
     pressure: 0,
     temperature: 0,
@@ -24,22 +25,33 @@ export default function LiveWaveform({
   const [pending, setPending] = useState(false);
 
   // --- Conexión WebSocket: solo recibe (datos + estado), nunca envía comandos ---
-  const handleMessage = useCallback((d: unknown) => {
-    // mensaje de estado del ESP32 → actualiza la card y corta
-    if (isSensorState(d)) {
-      setMeasuring(d.state === "measuring");
-      return;
-    }
+  useEffect(() => {
+    const ws = new WebSocket(WS_FRONTEND_URL);
+    wsRef.current = ws;
+    ws.onopen = () => setStatus("connected");
+    ws.onclose = () => setStatus("disconnected");
+    ws.onerror = () => setStatus("error");
+    ws.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+      
 
-    // si no, es una muestra: {t, p, temp}
-    const sample = d as SampleMessage;
-    if (typeof sample?.p !== "number") return; // guarda por si acaso
-    samplesBuffer.current.push(sample.p);
-    if (samplesBuffer.current.length > MAX_POINTS) samplesBuffer.current.shift();
-    setLatestSample({ pressure: sample.p, temperature: sample.temp ?? 0 });
+        // mensaje de estado del ESP32 → actualiza la card y corta
+        if (typeof d.state === "string") {
+          setMeasuring(d.state === "measuring");
+          return;
+        }
+
+        // si no, es una muestra: {t, p, temp}
+        if (typeof d.p !== "number") return; // guarda por si acaso
+        samplesBuffer.current.push(d.p);
+        if (samplesBuffer.current.length > MAX_POINTS)
+          samplesBuffer.current.shift();
+        setLatestSample({ pressure: d.p, temperature: d.temp });
+      } catch {}
+    };
+    return () => ws.close();
   }, []);
-
-  const status = useFrontendSocket({ onMessage: handleMessage });
 
   // --- Comando al ESP32: POST al backend, que reenvía la orden por su WS ---
   // No cambia measuring aquí: se espera la confirmación real ({"state": ...}) del ESP32.
@@ -200,7 +212,7 @@ function ConnectionStatusBadge({
   status,
   measuring,
 }: {
-  status: WsStatus;
+  status: string;
   measuring: boolean;
 }) {
   const config =
@@ -208,11 +220,13 @@ function ConnectionStatusBadge({
       ? measuring
         ? { color: "#00e0a8", text: "Measuring" }
         : { color: "#9ca3af", text: "Idle" }
-      : {
-          connecting: { color: "#ca8a04", text: "Conectando" },
-          disconnected: { color: "#dc2626", text: "Desconectado" },
-          error: { color: "#dc2626", text: "Error de red" },
-        }[status];
+      : (
+          {
+            connecting: { color: "#ca8a04", text: "Conectando" },
+            disconnected: { color: "#dc2626", text: "Desconectado" },
+            error: { color: "#dc2626", text: "Error de red" },
+          } as Record<string, { color: string; text: string }>
+        )[status] || { color: "#9ca3af", text: status };
 
   return (
     <div style={{ ...styles.badge, background: config.color }}>
