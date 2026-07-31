@@ -257,3 +257,99 @@ lector como para yo recordar qué tengo y qué hay.
         comprobar que opcion de grafica queda mejor, ahora marea un poco y no te aclaras.
 
         - Que en la grafica, me parece muy util y satisfactorio que : aparezca el rango de tiempo (conteo de minutos /segundos, que se está viendo)
+
+        - Eje X en hora de reloj, con un botón para cambiar. Hoy `axisTime()` en
+          `frontend/app/recordings/[id]/chartOption.ts` pinta mm:ss desde la primera muestra:
+          0, 15:00, 30:00... Para una noche entera eso no dice nada — quiero poder ver
+          22:00, 22:15, ..., 02:14, y cruzarlo con "a las 3 me desperté".
+
+          Un toggle (elapsed ↔ reloj) que afecte al eje, al tooltip y a las etiquetas del
+          slider de zoom, que hoy usan los tres el mismo `axisTime`. La hora sale de
+          `started_at` de la grabación (ya viene en el meta) + los segundos del punto, así que
+          no hace falta tocar los datos de la serie: es solo el formatter. Ojo con que cruza
+          medianoche y con la zona horaria (`started_at` viene del server).
+
+          Decidir si el modo elegido se recuerda entre grabaciones o vuelve al de por defecto.
+          Y cuál es el de por defecto: para una noche entera, seguramente el reloj.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+- esp32 se cae, y websocket se da cuenta en x seg ( aunque igual se reconecta y server no se ha dado ni cuenta de que se ha caido) (ademas se puede caer por wifi, o por power donde se restablecen millis y variables del firmware )
+
+
+
+
+si pulso start (o stop) , se envia por http, y el server manda por http a websocket (si web socket no responde      (aunque no este caido tecnicamente o aun no se sepa, si no se cibe response entonces es invalido y no se ha podido ni start ni stop it ))
+
+
+
+- si entre muestra x y x+1 hay mas de 2L ( L = LOOP_TIME) entonces ya no las uniria en grafica las muestras...
+
+asi si por ejemplo hay una desconexion de 20 seg , ...40seg, ...2 min .... 20 min ....2 horas ... no se unen pero sigue apareciendo despues en la grafica y no aparece como una grabacion aparte
+
+
+
+aunque en verdad cada 0.5 seg esta bien y mejor , asi que 5L o 10L ...
+sino un solo paquete perdido produce eso , y no es algo natural en respiracion, con 0.5
+
+
+
+-usar un buffer para cuando se caiga,ws/wifi, siga guardando mientras se reconecta
+
+
+
+
+- si es32 se reinciia se pone en stop measuring = false, y no mide nada...deberia empezar siempre en start...o ? 
+
+
+------todo esto da igual , es mejor usar una tarjeta microsd o spi o algo asi....y ya al finalizar se manda por wifi eso sií ( o bluetooth via movil y server desde el movil). tambien se puede ver en tiempo real si se quiere claro
+
+
+------
+Que el sensor no sea el punto bajo del circuito. Si el tubo baja hacia el sensor, el agua acaba ahí por gravedad. Colócalo por encima del recorrido del tubo.
+Haz un bucle de tubo colgando entre la cánula y el sensor, con el punto bajo lejos del sensor. Trampa de agua de pobre, funciona.
+Revisa el tubo por las mañanas las primeras noches, a ver si ves gotas. Si aparecen, ahí tienes tu respuesta antes de que sea un problema.----------
+-----------------
+
+
+
+
+- otros nombres de web/product : aither
+
+
+
+
+
+
+
+

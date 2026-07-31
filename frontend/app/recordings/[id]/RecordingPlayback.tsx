@@ -13,13 +13,29 @@ import {
 } from "../../lib/format";
 import { useCompact } from "../../lib/useCompact";
 import { useFullscreen } from "../../lib/useFullscreen";
-import { chartOption, chartViewPatch, type ChartView, type Points } from "./chartOption";
+import {
+  chartOption,
+  chartViewPatch,
+  chartYPatch,
+  defaultRange,
+  formatRange,
+  formatWindow,
+  rangeIndex,
+  visibleSeconds,
+  Y_RANGES,
+  type ChartView,
+  type Points,
+} from "./chartOption";
 import { BackLink, Stat, mobile, styles } from "./ui";
 
 // Vista de una grabación ya terminada: no hay tiempo real, se pinta el CSV entero.
 export default function RecordingPlayback({ recording }: { recording: Recording }) {
   const [points, setPoints] = useState<Points | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Escala del eje Y: se propone una al cargar y a partir de ahí manda el usuario.
+  const [chosenRange, setChosenRange] = useState<number | null>(null);
+  // Segundos de grabación que caben ahora mismo en pantalla (lo dice la gráfica).
+  const [visible, setVisible] = useState<number | null>(null);
   const compact = useCompact();
   // La tarjeta entera es lo que se va a pantalla completa: así el título y el
   // botón de salir siguen ahí dentro. En el móvil, además, en horizontal: en
@@ -44,6 +60,10 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
   const started = new Date(recording.started_at);
   const seconds = durationSeconds(recording.started_at, recording.ended_at);
   const summary = useMemo(() => describe(points), [points]);
+  // Sin estado intermedio: mientras el usuario no toque los botones vale la
+  // escala propuesta, y así la gráfica ya nace con la definitiva.
+  const suggested = useMemo(() => (points?.length ? defaultRange(points) : null), [points]);
+  const range = chosenRange ?? suggested;
 
   return (
     <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
@@ -93,10 +113,18 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
           <span style={styles.cardTitle}>Flujo de aire (Presión) · Pa</span>
           <div style={playbackStyles.headerActions}>
             <span style={playbackStyles.hint}>{zoomHint(compact, fullscreen)}</span>
+            {visible != null && <Readout label="Ventana" value={formatWindow(visible)} />}
+            {range != null && <ScaleControls range={range} onChange={setChosenRange} />}
             <FullscreenButton active={fullscreen} onToggle={toggleFullscreen} />
           </div>
         </div>
-        <ChartArea points={points} error={error} view={{ compact, fullscreen }} />
+        <ChartArea
+          points={points}
+          error={error}
+          view={{ compact, fullscreen }}
+          range={range}
+          onWindow={setVisible}
+        />
       </section>
     </main>
   );
@@ -113,18 +141,30 @@ function ChartArea({
   points,
   error,
   view,
+  range,
+  onWindow,
 }: {
   points: Points | null;
   error: string | null;
   view: ChartView;
+  range: number | null;
+  onWindow: (seconds: number) => void;
 }) {
   const inline = view.compact && !view.fullscreen;
   if (error != null)
     return <Placeholder text={`No se pudieron cargar los datos: ${error}`} inline={inline} />;
   if (points == null) return <Placeholder text="Cargando muestras…" inline={inline} />;
-  if (points.length === 0)
+  if (points.length === 0 || range == null)
     return <Placeholder text="Esta grabación no tiene ninguna muestra." inline={inline} />;
-  return <PressureChart points={points} compact={view.compact} fullscreen={view.fullscreen} />;
+  return (
+    <PressureChart
+      points={points}
+      range={range}
+      onWindow={onWindow}
+      compact={view.compact}
+      fullscreen={view.fullscreen}
+    />
+  );
 }
 
 function Placeholder({ text, inline }: { text: string; inline: boolean }) {
@@ -132,6 +172,75 @@ function Placeholder({ text, inline }: { text: string; inline: boolean }) {
     <div style={{ ...playbackStyles.placeholder, ...(inline ? playbackStyles.boxCompact : null) }}>
       <p style={playbackStyles.placeholderText}>{text}</p>
     </div>
+  );
+}
+
+// Rótulo de cabecera: etiqueta pequeña + valor en mono, como los de la barra.
+function Readout({ label, value }: { label: string; value: string }) {
+  return (
+    <span style={playbackStyles.readout}>
+      <span style={playbackStyles.readoutLabel}>{label}</span>
+      <span style={playbackStyles.readoutValue}>{value}</span>
+    </span>
+  );
+}
+
+// − aleja (más Pa a la vista), + acerca (menos Pa): siempre saltando de escalón
+// en escalón, y siempre simétrico respecto al cero.
+function ScaleControls({ range, onChange }: { range: number; onChange: (r: number) => void }) {
+  const i = rangeIndex(range);
+
+  return (
+    <span style={playbackStyles.readout}>
+      <span style={playbackStyles.readoutLabel}>Escala</span>
+      <StepButton
+        label="−"
+        title="Alejar: más rango en el eje Y"
+        disabled={i >= Y_RANGES.length - 1}
+        onClick={() => onChange(Y_RANGES[i + 1])}
+      />
+      <span style={{ ...playbackStyles.readoutValue, ...playbackStyles.scaleValue }}>
+        {formatRange(range)}
+      </span>
+      <StepButton
+        label="+"
+        title="Acercar: menos rango en el eje Y"
+        disabled={i <= 0}
+        onClick={() => onChange(Y_RANGES[i - 1])}
+      />
+    </span>
+  );
+}
+
+function StepButton({
+  label,
+  title,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      style={{
+        ...playbackStyles.stepButton,
+        ...(hover && !disabled ? playbackStyles.stepButtonHover : null),
+        ...(disabled ? playbackStyles.stepButtonOff : null),
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -163,18 +272,23 @@ function FullscreenButton({ active, onToggle }: { active: boolean; onToggle: () 
 
 function PressureChart({
   points,
+  range,
+  onWindow,
   compact,
   fullscreen,
 }: {
   points: Points;
+  range: number;
+  onWindow: (seconds: number) => void;
   compact: boolean;
   fullscreen: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ECharts | null>(null);
-  // echarts se carga de forma asíncrona: cuando termine puede que la vista ya
-  // haya cambiado, así que la lee de aquí y no del closure.
+  // echarts se carga de forma asíncrona: cuando termine puede que la vista o la
+  // escala ya hayan cambiado, así que las lee de aquí y no del closure.
   const viewRef = useRef<ChartView>({ compact, fullscreen });
+  const rangeRef = useRef(range);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -183,15 +297,21 @@ function PressureChart({
     let chart: ECharts | undefined;
     let observer: ResizeObserver | undefined;
     let disposed = false;
+    const span = points[points.length - 1][0] - points[0][0];
 
     // echarts sólo en el navegador: import dinámico para no cargarlo en el SSR
     import("echarts").then((echarts) => {
       if (disposed) return;
-      chart = echarts.init(container, undefined, { renderer: "canvas" });
-      chart.setOption(chartOption(points, viewRef.current));
-      chartRef.current = chart;
+      const instance = echarts.init(container, undefined, { renderer: "canvas" });
+      chart = instance;
+      chartRef.current = instance;
+      instance.setOption(chartOption(points, viewRef.current, rangeRef.current));
+      // Al arrancar se ve la grabación entera; después, lo que deje el zoom.
+      const report = () => onWindow(visibleSeconds(instance, span));
+      instance.on("dataZoom", report);
+      report();
       // También cubre el cambio de tamaño al entrar y salir de pantalla completa.
-      observer = new ResizeObserver(() => chart?.resize());
+      observer = new ResizeObserver(() => instance.resize());
       observer.observe(container);
     });
 
@@ -201,7 +321,7 @@ function PressureChart({
       observer?.disconnect();
       chart?.dispose();
     };
-  }, [points]);
+  }, [points, onWindow]);
 
   // setOption parcial: reajusta márgenes y gestos sin repintar la serie ni
   // perder el zoom actual.
@@ -209,6 +329,12 @@ function PressureChart({
     viewRef.current = { compact, fullscreen };
     chartRef.current?.setOption(chartViewPatch(viewRef.current));
   }, [compact, fullscreen]);
+
+  // Ídem con la escala del eje Y: sólo cambian los límites del eje.
+  useEffect(() => {
+    rangeRef.current = range;
+    chartRef.current?.setOption(chartYPatch(range));
+  }, [range]);
 
   return (
     <div
@@ -293,13 +419,17 @@ const playbackStyles = {
     marginLeft: "auto",
     flexWrap: "wrap" as const,
   },
+  // El borde va desglosado (no `border: …`) porque el hover sólo cambia el
+  // color: mezclar la forma corta con la larga rompe el estilo al re-renderizar.
   fullscreenButton: {
     display: "flex",
     alignItems: "center",
     gap: 7,
     background: PAPER,
     color: INK,
-    border: `2px solid ${INK}`,
+    borderWidth: 2,
+    borderStyle: "solid" as const,
+    borderColor: INK,
     boxShadow: `3px 3px 0 ${INK}`,
     padding: "7px 12px",
     fontFamily: MONO,
@@ -315,6 +445,40 @@ const playbackStyles = {
     boxShadow: `4px 4px 0 ${ACCENT}`,
     transform: "translate(-1px, -1px)",
   },
+  readout: { display: "flex", alignItems: "center", gap: 6 },
+  readoutLabel: {
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: 700,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+    color: "#888",
+  },
+  readoutValue: { fontFamily: MONO, fontSize: 12, fontWeight: 800, color: INK },
+  // Ancho fijo: al cambiar de escalón los botones no se mueven de sitio.
+  scaleValue: { minWidth: 72, textAlign: "center" as const },
+  stepButton: {
+    width: 26,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: PAPER,
+    color: INK,
+    borderWidth: 2,
+    borderStyle: "solid" as const,
+    borderColor: INK,
+    boxShadow: `2px 2px 0 ${INK}`,
+    padding: 0,
+    fontFamily: MONO,
+    fontSize: 15,
+    fontWeight: 900,
+    lineHeight: 1,
+    cursor: "pointer",
+    transition: "box-shadow 0.15s ease, border-color 0.15s ease",
+  },
+  stepButtonHover: { borderColor: ACCENT, boxShadow: `3px 3px 0 ${ACCENT}` },
+  stepButtonOff: { opacity: 0.3, cursor: "default" },
   hint: {
     fontFamily: MONO,
     fontSize: 10,

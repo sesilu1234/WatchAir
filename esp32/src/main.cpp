@@ -8,7 +8,7 @@ const unsigned long LOOP_TIME = 50;          // ~20 Hz
 const unsigned long WIFI_CHECK_INTERVAL = 10000;
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 
-const char* ssid     = "MIWIFI_g4hr 2G";
+const char* ssid     = "PR_2.4GHz";
 const char* password = "GNjkqFXs";
 const char* host     = "13.48.132.12";
 const uint16_t port  = 8000;
@@ -52,7 +52,7 @@ void setup() {
   sdp.stopContinuousMeasurement();
   delay(25);
   sdp.startContinuousMeasurementWithDiffPressureTCompAndAveraging();
-
+  Serial.printf("Connecting to WiFi: %s\n", ssid);
   // WiFi
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);        // no reescribir credenciales en flash
