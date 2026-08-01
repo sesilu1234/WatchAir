@@ -15,37 +15,50 @@ decide por su cuenta que una grabación existe o dejó de existir; solo lo refle
 
 ### 1.1 El UUID lo genera el server y viaja al aparato
 
-Al pulsar grabar, el server hace el INSERT primero y **le manda el UUID a la ESP32, que
-nombra el fichero de la SD con él** (`/rec/<uuid>.bin`).
+Al pulsar grabar, el server genera el UUID y **se lo manda a la ESP32, que nombra el fichero
+de la SD con él** (`/rec/<uuid>.bin`). El INSERT en la DB no va aquí: va después, cuando
+llegue el ACK (1.2).
 
 Esto no es un detalle: es lo que hace que un fichero que llega dos días tarde se sepa a qué
 fila pertenece, que subir sea idempotente (reenviar el mismo fichero no duplica nada) y que
 el inventario al reconectar (1.6) sea trivial. Sin esto, todo lo demás se complica.
 
-### 1.2 Start
+### 1.2 Start: la fila nace del ACK, no del clic
+
+**El flujo va al revés de lo que parece natural: la fila en la DB no existe hasta que la
+ESP32 confirma que está grabando.**
 
 1. Usuario pulsa grabar. UI en loading.
-2. Server: comprueba que no hay grabación en curso → INSERT con `started_at = now()` →
-   obtiene `<uuid>`. La fila nace en estado **`iniciando`**.
-3. Server → ESP32: `{"cmd":"start","id":"<uuid>"}`.
+2. Server: comprueba que no hay grabación en curso → genera `<uuid>` → lo guarda como
+   **start pendiente en una variable en RAM**, no en la DB.
+3. Server → ESP32: `{"cmd":"start","id":"<uuid>"}` por el WS del aparato.
 4. ESP32: comprueba precondiciones (1.9) → abre `/rec/<uuid>.bin` → `grabando = true` →
    guarda el marcador de sesión en la SD (1.5).
 5. ESP32 → server: `{"ack":"start","id":"<uuid>","rec":true}`.
-6. Server: fila a **`grabando`**, `self.recording = <uuid>`, y lo difunde a los frontends.
+6. Server: **INSERT** con `started_at`, `self.recording = <uuid>`, tira el pendiente de la
+   RAM y lo difunde a los frontends. La fila nace directamente en **`grabando`**.
 7. UI: sale del loading y pone "grabando".
 
-**Si el ACK no llega en ~5 s**, el server no borra la fila: la deja en **`iniciando`** y avisa
-al usuario de que no se pudo confirmar. Es la diferencia entre "no arrancó" y "no sé si
-arrancó", y hay que tratarlas distinto, porque:
+**Si el ACK no llega en ~5 s**, no hay fila. La UI dice que no se pudo arrancar y ya está: no
+queda rastro en la DB, no hay nada que limpiar después, y el usuario vuelve a pulsar.
 
-**El caso feo: el ACK se pierde pero la ESP32 sí arrancó.** El wifi se cae justo entre el
-paso 4 y el 5. La ESP32 está grabando y el server cree que no. Si el server hubiera borrado
-la fila, ese fichero llegaría después sin dueño. Como la fila sigue en `iniciando`, el
-handshake de reconexión (1.6) la resucita a `grabando` en cuanto el aparato vuelve, y todo
-cuadra. **Por eso una fila `iniciando` no se borra nunca automáticamente** — se queda hasta
-que se confirma o hasta que el usuario la descarta a mano.
+**El caso feo, y por qué ahora da igual.** El wifi se cae justo entre el paso 4 y el 5: la
+ESP32 está grabando y el server no tiene fila. Antes eso obligaba a inventar un estado
+`iniciando` que no se podía borrar nunca. Ahora esa grabación es **huérfana y se descarta**:
+si el arranque le falló al usuario, el usuario ni se puso la cánula, así que en ese fichero
+no hay señal que perder. Se tira un fichero de ruido, no una noche de datos.
 
-Mientras haya una fila en `iniciando` o `grabando`, no se admite empezar otra.
+**Re-pulsar es la vía de salida.** El server genera un `<uuid>` nuevo y manda otro `start`.
+La ESP32, al recibir un `start` con un id distinto del que tiene abierto, **cierra y borra el
+suyo y arranca de cero**. No necesita saber si su grabación estaba confirmada o no: la guarda
+vive en el server, que no manda un segundo `start` mientras tenga una fila en `grabando` — y
+esa comprobación va **contra la DB, no contra la RAM**, para que sobreviva a un reinicio del
+server.
+
+**Esto elimina el estado `iniciando`.** Solo hay filas de grabaciones que existieron de
+verdad.
+
+Mientras haya una fila en `grabando`, no se admite empezar otra.
 
 ### 1.3 Stop
 
@@ -61,7 +74,8 @@ Mientras haya una fila en `iniciando` o `grabando`, no se admite empezar otra.
 el ACK se pierde, el usuario le va a dar otra vez. Una ESP32 que recibe `stop` sin estar
 grabando **no debe responder error**, debe responder el mismo `ack` de siempre con
 `rec:false`. Igual con `start`: si llega un `start` con el UUID que ya está grabando, se
-responde el ACK y ya, no se abre un fichero nuevo.
+responde el ACK y ya, no se abre un fichero nuevo. (Un `start` con un UUID **distinto** es
+otra cosa: ese es el re-pulsar de 1.2, y ahí sí se descarta el fichero abierto.)
 
 Si no hay ESP32, el stop falla y la UI dice que el aparato está desconectado. Aceptado:
 para parar hace falta wifi, y la salida cuando no lo hay son las 12 h.
@@ -123,11 +137,18 @@ reiniciado, ESP32 reiniciada, wifi caído seis horas, el ACK perdido de 1.2, y e
 12 h que ocurrió sin testigos. Todo el estado del server es derivable de este mensaje.
 
 Reglas al recibirlo:
-- `rec` con un uuid que el server tenía en `iniciando` → pasa a `grabando`. (El caso feo.)
+- `rec` con un uuid **que el server no conoce** → es el huérfano de 1.2 (el ACK que se
+  perdió). No se crea fila: se manda `stop` y se descarta. (Ver §4.)
 - `rec` con un uuid que el server ya daba por terminado → **gana la ESP32**, se reabre.
 - `rec: null` y el server creía que grababa → se cierra la fila; el fichero llegará por
   `pending`.
-- Cada uuid de `pending` → se pone en cola de subida (1.7).
+- Cada uuid de `pending` **con fila** → se pone en cola de subida (1.7). Sin fila, mismo
+  criterio que el huérfano.
+
+**El `hello` es el primer frame del socket, y hay que tratarlo como tal:** acotarlo con un
+timeout, rechazar un frame binario o un JSON que no cuadre, y aguantar una desconexión a
+media identificación. Un socket a medio identificar no puede quedarse en el mapa de
+conexiones.
 
 ### 1.7 Subida del fichero
 
@@ -148,8 +169,7 @@ Reglas al recibirlo:
 
 | Estado | Qué significa | Qué ve el usuario |
 |---|---|---|
-| `iniciando` | INSERT hecho, sin ACK del aparato | "iniciando…" / "no confirmado" |
-| `grabando` | Confirmado por la ESP32 | "grabando · 02:14:33" |
+| `grabando` | Confirmado por la ESP32 (la fila nace aquí) | "grabando · 02:14:33" |
 | `esperando fichero` | Terminada, el fichero sigue en la SD | "pendiente de descargar" |
 | `subiendo` | Transferencia en curso | barra de progreso, % |
 | `completa` | Fichero íntegro en el server | normal |
@@ -157,6 +177,8 @@ Reglas al recibirlo:
 
 `sin fichero` **no es definitivo**: si la SD todavía lo tiene, aparecerá en `pending` en
 cualquier reconexión futura y la fila se completará sola.
+
+**No hay estado `iniciando`**: un start sin confirmar no llega a ser una fila (1.2).
 
 ### 1.9 Precondiciones del start
 
@@ -168,8 +190,10 @@ Que fallen tiene que impedir la grabación de forma ruidosa, nunca grabar en el 
 - **Sensor respondiendo** por I2C (una lectura de prueba antes de decir que sí).
 - *(Cuando haya batería)* nivel suficiente para la noche.
 
-El ACK del start puede llevar el motivo del fallo para que la UI diga qué pasa en vez de un
-error genérico.
+Una precondición que falla se responde con el mismo ACK pero `rec:false` y el motivo: el
+server **no hace el INSERT** y la UI dice qué pasó en vez de un error genérico. Es la única
+diferencia práctica entre "falló" y "no contestó" (1.2), y desde fuera se ven igual salvo por
+ese motivo.
 
 ### 1.10 Formato del fichero
 
@@ -209,7 +233,8 @@ no está muerta.
 
 ### 2.2 El streaming es estado derivado, no un comando
 
-Entrar en `/realtime` abre el WS. El server cuenta frontends conectados:
+Entrar en `/realtime` abre el WS (autenticado, y con el aparato sacado del token: 3.4). El
+server cuenta frontends conectados **de ese aparato**:
 
 - 0 → 1: manda `start` a la ESP32 (empieza a emitir en tiempo real).
 - 1 → 0: manda `stop`.
@@ -266,7 +291,118 @@ aunque de momento ponga "USB" — obliga a pensarla como "estado del aparato" y 
 
 ---
 
-## 3. Decisiones abiertas
+## 3. Auth y reparto de servidores
+
+Hasta ahora el frontend hablaba con la EC2 sin que nadie preguntase quién era. Eso se acaba:
+**la app pide login**, y para sostenerlo aparece una segunda pieza de servidor.
+
+### 3.1 La frontera: "quién eres" vs "qué hace el aparato"
+
+- **Vercel / Next** (el [frontend/](frontend/) de hoy, más NextAuth) se queda con la
+  identidad: Google, sesiones, cookies, pantalla de login. Es su idioma nativo.
+- **EC2 / FastAPI** se queda con el aparato: WS de la ESP32, muestreo, ficheros, tiempo real.
+  **La EC2 nunca habla con Google.**
+- El puente entre las dos es **un secreto compartido y un JWT corto**.
+
+Meter OAuth directamente en la EC2 para ahorrarse el trayecto se descarta a propósito: parece
+lo profesional y es justo lo contrario — adoptas un subsistema de auth casero, y lo mantienes
+de por vida, a cambio de ahorrar un salto de red de milisegundos.
+
+### 3.2 Un solo modelo de token
+
+Next valida la sesión y **acuña un JWT corto firmado con el secreto compartido**. La EC2 solo
+hace `jwt.decode`: verificación HMAC de microsegundos, sin red y sin depender de Google. Si
+Google se cae, el live sigue vivo hasta que caduque el token.
+
+Claims mínimos: la cuenta, **el aparato al que da acceso**, y un `exp` corto.
+
+El secreto va como variable de entorno en los dos lados. **Nunca con prefijo
+`NEXT_PUBLIC_`**: eso lo hornea en el bundle del navegador y regalas la capacidad de firmar
+tokens.
+
+### 3.3 Las dos vías que usan ese token
+
+Un token, dos usos, para no inventar dos caminos de auth:
+
+| Vía | Cómo viaja |
+|---|---|
+| WS del live | query param: `/ws?token=...`, validado en el connect |
+| POST de grabar / parar | header `Authorization: Bearer ...`, directo del navegador a la EC2 |
+
+**El aparato sale del claim del token, no de la URL.** Es la diferencia entre identificarse y
+decir un número: un id inventado no entra al mapa de viewers porque, sin firma válida, ni se
+llega a leer.
+
+El token en la query acaba en los logs de acceso y en cualquier proxy que haya por el medio.
+Por eso vive poco (3.5) y por eso `wss://` deja de ser opcional en cuanto esto salga a
+internet (§4).
+
+**Por qué "grabar" es HTTP y no un mensaje por el WS del navegador:** es un disparo puntual
+con respuesta (arrancó / no arrancó, y por qué), que es exactamente la forma de una petición
+HTTP; y además el WS del navegador se muere al cambiar de ruta, así que no puedes colgar de
+él una acción que tiene que sobrevivir a una navegación. El navegador hace el POST y el
+server lo traduce a `{"cmd":"start"}` sobre el WS de la ESP32, que es la única vía al aparato
+y siempre lo fue.
+
+### 3.4 El endpoint `/ws`
+
+Un solo endpoint, **sin id en la ruta**. Los viewers se guardan en un
+`dict[device_id, set[WebSocket]]` que sustituye al `manager.frontends` de hoy
+([main.py:148](server/app/main.py#L148)).
+
+> Cuidado con el nombre: en el resto de este documento `<uuid>` es el id de una **grabación**.
+> El de aquí es el id del **aparato**. Son cosas distintas y conviene que se llamen distinto
+> en el código (`device_id` vs `rec_id`).
+
+Buscar es O(1), el `set` resuelve gratis varios navegadores de la misma cuenta, y sus
+transiciones **0→1 / 1→0** son las que disparan el start/stop de emisión de 2.2 — ahora por
+aparato, no globales.
+
+En el connect:
+
+- Validar el token **antes de dar la conexión por buena**. Cuesta microsegundos, y la
+  consulta de "¿este aparato es de esta cuenta?" es un `await` que no bloquea el bucle de
+  muestras.
+- Token inválido → cerrar con **4401**. Detalle práctico de Starlette: para que el navegador
+  llegue a ver ese código hay que `accept()` y cerrar acto seguido; un `close()` *antes* del
+  `accept()` sale como un 403 del handshake y el cliente solo ve "falló", sin poder
+  distinguir token caducado de server caído.
+- La limpieza del set, en un `finally`. Siempre, y pase lo que pase.
+
+### 3.5 TTL de conexión
+
+**El token caduca pero el socket no.** Un socket abierto con un token robado seguiría vivo
+para siempre. Así que el server se guarda el `exp` del claim y **cierra la conexión cuando se
+cumple**.
+
+El cliente legítimo reconecta solo: es el mismo `connect()` que ya se reusa para cuando el
+portátil sale de suspensión
+([useFrontendSocket.ts:32](frontend/app/lib/useFrontendSocket.ts#L32)). El que entró con un
+token robado es expulsado y no puede volver sin conseguir otro válido.
+
+### 3.6 Reconexión del navegador
+
+**Toda reconexión pasa por pedir un token fresco**, y eso convierte al endpoint de token en
+un checkpoint de auth continuo: una sesión revocada corta el live en el primer reintento, sin
+inventar ningún mecanismo de revocación aparte.
+
+Cuándo reconectar sigue el criterio de 2.4: **frescura de los datos** y los eventos
+`visibilitychange` / `online`, no esperar a que el TCP se entere.
+
+### 3.7 Qué toca cambiar de lo que ya hay
+
+- [api.ts](frontend/app/lib/api.ts): `WS_FRONTEND_URL` (`/frontend`) pasa a `/ws?token=...`,
+  y `request()` tiene que pedir el token y meter el `Authorization: Bearer`.
+- [main.py:352](server/app/main.py#L352): el WS `/frontend` pasa a `/ws` con auth, y el set
+  pasa a dict por aparato.
+- Los `@app.post` de comandos pasan a exigir el Bearer.
+- CORS en la EC2: el POST sale de un origen (Vercel) distinto al de la API.
+- **La ESP32 sigue entrando a `/sensor` sin credencial.** En mono-usuario pasa; es la pieza
+  que falta, y está en §4.
+
+---
+
+## 4. Decisiones abiertas
 
 - **Las 12 h tras un reinicio: ¿se cuentan desde el inicio original o desde el reinicio?**
   Propongo desde el original (por eso el marcador de 1.5 guarda los ms acumulados).
@@ -274,13 +410,21 @@ aunque de momento ponga "USB" — obliga a pensarla como "estado del aparato" y 
   siempre que quede espacio para las 12 h, y que la subida espere a que termine (1.7).
 - **¿Se sube algo mientras se graba?** Propongo que no. Si se decide que sí, hay que medir
   qué le hace al muestreo.
-- **Descartar a mano una fila `iniciando`** que nunca se confirmó: ¿la borra el usuario desde
-  la UI, o caduca sola pasadas las 12 h como el resto?
+- **El `rec` / `pending` desconocido del handshake** (1.6): ¿el server manda borrarlo al
+  vuelo, o lo deja en la SD y se purga por antigüedad? Propongo borrarlo al vuelo — si no,
+  una ESP32 con el ACK perdido se pasa 12 h grabando en el vacío y llenando la tarjeta.
 - **Cuánto se reescribe el marcador de sesión** (1.5): cada 10 s, cada 30 s.
+
+**Para cuando toque multiusuario de verdad.** Nada de esto bloquea seguir en mono-usuario,
+pero sí bloquea que datos de otra persona viajen por internet:
+
+- **TLS / `wss://` obligatorio.** Hoy el token viaja en claro en la query.
+- **Credencial del aparato**: la ESP32 entra a `/sensor` sin identificarse (3.7).
+- **Provisioning de wifi por aparato**, para no recompilar el firmware por cada casa.
 
 ---
 
-## 4. Qué se cae del toDo viejo
+## 5. Qué se cae del toDo viejo
 
 Con esta arquitectura dejan de existir, no se arreglan:
 
