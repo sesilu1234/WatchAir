@@ -1,0 +1,57 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+- el usuario pulsa grabar desde UI, despues puede estar desconectado todo el rato la ESP32 si quiere, pero para parar grabacion es necesrio wifi otra vez porque se para desde UI
+
+si supera las 12 horas se para grabacion (tanto en esp32 tiene lo de 12 horas, como en server para poner self.recording = False)
+
+- usuario clic a grabar, y tiene que esperar confirmacion de ESP32 de que está grabando. aparece igual que está ahora. en server pone para el usuario ese recording =  True, y cuando usuario pare recording desde ui o superen 12 horas se pondra a recording = False y asi cuando ya no aparece lo de grabando en UI
+
+al grabar se crea fila en database, hora de inicio (conseguida quizas la hora de inicio desde esp32 quizas ? )
+
+
+
+al parar grabacion aparece un spinner o loading diciendo esperando confiramcion de esp32 o algo asi..y espera tambien a envio del archivo binario, y asi aparece row nueva instantaneo
+
+si no se pudiera parar, avisaria de esp32 desconectado
+
+
+
+
+quizas incluso puede aparecer una card de status del esp32 si está online o conectada...quizas ?  
+
+
+y sigue pudiendose hacer lo del live-view (aunque este desconectada, diria ) . aun asi lo del live-view o real-time duplicado no sé si tiene sentido realmente...quizas con que esté el apartado de live-view ya vale...es decri pulsar ese boton te lleva ahi http://localhost:3000/realtime directamente ( y en caso de estar recording quizas te avise de ello). o que opinas ? 
+
+y aqui se puede lo de start/stop que le hace que deje de enviar datos por wifi constantemente el esp32.
+y quizas lo de start / stop no tiene sentido. simplemente, si hay un browser en ws/live (al cual se conecta si esta en esa ruta...) , y en cuanto sale de esa ruta pues... 
+y el server deberia estar haciendo loop de comporbar si hay conectado alguien a eso para si no , pues poner en stop el esp32
+
+
+- los aparatos estos oura, fitbit, etc...suelen tener bluetooth activado todo el rato...para mi por ahora para mi caso hago lo mismo pero con wifi, activado todo el rato y si desconecta se intenta constantemente reconectar al wifi hardcodeado con pio
+
+
+- revisar el status de la esp32 cada 1 seg que tal ? 
+
+
+
+
+
+
+
+
+
+
+
