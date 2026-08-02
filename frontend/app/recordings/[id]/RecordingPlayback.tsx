@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ECharts } from "echarts";
 import { ACCENT, INK, MONO, PAPER } from "../../theme";
-import { fetchRecordingSamples, recordingDataUrl, type Recording } from "../../lib/api";
+import { fetchRecordingSamples, type Recording } from "../../lib/api";
 import {
   durationSeconds,
   formatDate,
@@ -45,21 +45,24 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
     landscape: compact,
   });
 
-  // page.tsx monta este componente con key={id}, así que al cambiar de grabación
-  // se remonta y el estado arranca limpio: aquí sólo hace falta pedir el CSV.
+  // page.tsx monta este componente con key={uuid}, así que al cambiar de
+  // grabación se remonta y el estado arranca limpio: aquí sólo hace falta
+  // pedir los datos.
   useEffect(() => {
     let cancelled = false;
-    fetchRecordingSamples(recording.id)
+    fetchRecordingSamples(recording.uuid)
       .then((p) => !cancelled && setPoints(p))
       .catch((err) => !cancelled && setError(err instanceof Error ? err.message : String(err)));
     return () => {
       cancelled = true;
     };
-  }, [recording.id]);
+  }, [recording.uuid]);
 
   const started = new Date(recording.started_at);
   const seconds = durationSeconds(recording.started_at, recording.ended_at);
   const summary = useMemo(() => describe(points), [points]);
+  // Cuenta muestras reales: los puntos y=null son marcadores de hueco, no datos.
+  const sampleCount = useMemo(() => points?.filter(([, p]) => p !== null).length ?? null, [points]);
   // Sin estado intermedio: mientras el usuario no toque los botones vale la
   // escala propuesta, y así la gráfica ya nace con la definitiva.
   const suggested = useMemo(() => (points?.length ? defaultRange(points) : null), [points]);
@@ -73,21 +76,21 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
           {recordingName(recording.started_at)}
         </h1>
         <p style={styles.subtitle}>
-          {formatDate(started)} · {formatTime(started)} · {recording.client}
+          {formatDate(started)} · {formatTime(started)} · {recording.username}
         </p>
       </header>
 
       <div style={{ ...styles.bar, ...(compact ? mobile.bar : null) }}>
         <Stat label="Duración" value={seconds == null ? "—" : formatClock(seconds)} />
-        <Stat label="Muestras" value={formatNumber(recording.samples)} />
+        <Stat label="Muestras" value={sampleCount == null ? "—" : formatNumber(sampleCount)} />
         <Stat
           label="Frecuencia"
-          value={seconds ? `${formatNumber(recording.samples / seconds, 1)} Hz` : "—"}
+          value={seconds && sampleCount ? `${formatNumber(sampleCount / seconds, 1)} Hz` : "—"}
         />
         <Stat label="Mín / Máx" value={summary ? `${summary.min} / ${summary.max} Pa` : "—"} />
         <Stat label="Media" value={summary ? `${summary.mean} Pa` : "—"} />
         <a
-          href={recordingDataUrl(recording.id)}
+          href={`/api/recordings/${recording.uuid}/data?format=csv`}
           download={`${recordingName(recording.started_at)}.csv`}
           style={{
             ...styles.button,
@@ -350,19 +353,23 @@ function PressureChart({
 // --- Resumen numérico: los valores del tooltip también se leen sin hover ---
 
 function describe(points: Points | null) {
-  if (points == null || points.length === 0) return null;
+  if (points == null) return null;
   let min = Infinity;
   let max = -Infinity;
   let sum = 0;
+  let count = 0;
   for (const [, p] of points) {
+    if (p === null) continue;
     if (p < min) min = p;
     if (p > max) max = p;
     sum += p;
+    count++;
   }
+  if (count === 0) return null;
   return {
     min: formatNumber(min, 1),
     max: formatNumber(max, 1),
-    mean: formatNumber(sum / points.length, 2),
+    mean: formatNumber(sum / count, 2),
   };
 }
 

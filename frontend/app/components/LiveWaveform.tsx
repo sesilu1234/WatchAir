@@ -1,73 +1,50 @@
 "use client";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
-import { WS_FRONTEND_URL, startSensor, stopSensor } from "../lib/api";
+import { isDeviceOnline, isSample } from "../lib/api";
+import { useFrontendSocket } from "../lib/useFrontendSocket";
 import { useCompact } from "../lib/useCompact";
 
 const MAX_POINTS = 200;
 
-// Vista en vivo de la señal del ESP32: conexión WS, gráfica y control start/stop.
-// Compartida por /realtime y por /recordings/[id] cuando se está grabando ahora mismo.
-export default function LiveWaveform({
-  hideMeasurementButton = false,
-}: {
-  hideMeasurementButton?: boolean;
-} = {}) {
+// Vista en vivo de la señal del ESP32. La emisión es un estado derivado del
+// lado del server: en cuanto este componente se suscribe (abre el WS),
+// server2 manda start_broadcast a la ESP32; al desmontarse, stop_broadcast.
+// El navegador nunca manda comandos de emisión — no hay botón start/stop.
+export default function LiveWaveform() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const samplesBuffer = useRef<number[]>([]);
-  const wsRef = useRef<WebSocket | null>(null);
   const compact = useCompact();
 
-  const [status, setStatus] = useState("connecting");
-  const [latestSample, setLatestSample] = useState({
-    pressure: 0,
-    temperature: 0,
-  });
-  const [measuring, setMeasuring] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
+  const [latestSample, setLatestSample] = useState({ pressure: 0, temperature: 0 });
+  const [receiving, setReceiving] = useState(false);
+  const receivingTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // --- Conexión WebSocket: solo recibe (datos + estado), nunca envía comandos ---
-  useEffect(() => {
-    const ws = new WebSocket(WS_FRONTEND_URL);
-    wsRef.current = ws;
-    ws.onopen = () => setStatus("connected");
-    ws.onclose = () => setStatus("disconnected");
-    ws.onerror = () => setStatus("error");
-    ws.onmessage = (ev) => {
-      try {
-        const d = JSON.parse(ev.data);
-      
-
-        // mensaje de estado del ESP32 → actualiza la card y corta
-        if (typeof d.state === "string") {
-          setMeasuring(d.state === "measuring");
-          return;
-        }
-
-        // si no, es una muestra: {t, p, temp}
-        if (typeof d.p !== "number") return; // guarda por si acaso
-        samplesBuffer.current.push(d.p);
-        if (samplesBuffer.current.length > MAX_POINTS)
-          samplesBuffer.current.shift();
-        setLatestSample({ pressure: d.p, temperature: d.temp });
-      } catch {}
-    };
-    return () => ws.close();
-  }, []);
-
-  // --- Comando al ESP32: POST al backend, que reenvía la orden por su WS ---
-  // No cambia measuring aquí: se espera la confirmación real ({"state": ...}) del ESP32.
-  const toggleMeasurement = async () => {
-    if (pending) return;
-    setPending(true);
-    try {
-      await (measuring ? stopSensor() : startSensor());
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setPending(false);
+  const handleMessage = (data: unknown) => {
+    if (isDeviceOnline(data)) {
+      setDeviceOnline(data.type === "device_online");
+      return;
+    }
+    if (isSample(data)) {
+      samplesBuffer.current.push(data.p);
+      if (samplesBuffer.current.length > MAX_POINTS) samplesBuffer.current.shift();
+      setLatestSample({ pressure: data.p, temperature: data.temp ?? 0 });
+      setReceiving(true);
+      clearTimeout(receivingTimeout.current);
+      receivingTimeout.current = setTimeout(() => setReceiving(false), 1500);
     }
   };
+
+  const wsStatus = useFrontendSocket({
+    onMessage: handleMessage,
+    onOpen: () => {
+      samplesBuffer.current = [];
+      setReceiving(false);
+    },
+  });
+
+  useEffect(() => () => clearTimeout(receivingTimeout.current), []);
 
   // --- Dibujo: solo el área bajo la curva, sin marcas ---
   useEffect(() => {
@@ -151,14 +128,7 @@ export default function LiveWaveform({
   return (
     <>
       <div style={{ ...styles.statusCorner, ...(compact ? mobile.statusCorner : null) }}>
-        <ConnectionStatusBadge status={status} measuring={measuring} />
-        {!hideMeasurementButton && (
-          <MeasurementButton
-            measuring={measuring}
-            disabled={status !== "connected" || pending}
-            onToggle={toggleMeasurement}
-          />
-        )}
+        <ConnectionStatusBadge wsStatus={wsStatus} deviceOnline={deviceOnline} receiving={receiving} />
       </div>
 
       <section style={{ ...styles.card, ...(compact ? mobile.card : null) }}>
@@ -215,95 +185,28 @@ function Metric({
 }
 
 function ConnectionStatusBadge({
-  status,
-  measuring,
+  wsStatus,
+  deviceOnline,
+  receiving,
 }: {
-  status: string;
-  measuring: boolean;
+  wsStatus: "connecting" | "connected" | "disconnected" | "error";
+  deviceOnline: boolean | null;
+  receiving: boolean;
 }) {
-  const config =
-    status === "connected"
-      ? measuring
-        ? { color: "#00e0a8", text: "Measuring" }
-        : { color: "#9ca3af", text: "Idle" }
-      : (
-          {
-            connecting: { color: "#ca8a04", text: "Conectando" },
-            disconnected: { color: "#dc2626", text: "Desconectado" },
-            error: { color: "#dc2626", text: "Error de red" },
-          } as Record<string, { color: string; text: string }>
-        )[status] || { color: "#9ca3af", text: status };
+  const config = (() => {
+    if (wsStatus === "connecting") return { color: "#ca8a04", text: "Conectando" };
+    if (wsStatus === "disconnected") return { color: "#dc2626", text: "Desconectado" };
+    if (wsStatus === "error") return { color: "#dc2626", text: "Error de red" };
+    if (deviceOnline === false) return { color: "#dc2626", text: "ESP32 desconectada" };
+    if (receiving) return { color: "#00e0a8", text: "Recibiendo datos" };
+    return { color: "#9ca3af", text: "ESP32 conectada" };
+  })();
 
   return (
     <div style={{ ...styles.badge, background: config.color }}>
       <span style={styles.badgeDot} />
       {config.text}
     </div>
-  );
-}
-
-function MeasurementButton({
-  measuring,
-  disabled,
-  onToggle,
-}: {
-  measuring: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const interactiveHover = hovered && !disabled;
-  const breathing = !measuring && !disabled && !interactiveHover;
-
-  return (
-    <>
-      <button
-        onClick={onToggle}
-        disabled={disabled}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        className={breathing ? "measure-breathe" : undefined}
-        style={{
-          ...styles.measureButton,
-          background: PAPER,
-          color: INK,
-          border: interactiveHover ? `2px solid ${ACCENT}` : `2px solid ${INK}`,
-          opacity: disabled ? 0.4 : 1,
-          cursor: disabled ? "not-allowed" : "pointer",
-          boxShadow: interactiveHover
-            ? `5px 5px 0 ${ACCENT}`
-            : `4px 4px 0 ${INK}`,
-          transform: interactiveHover ? "translate(-1px, -1px)" : "none",
-        }}
-      >
-        {measuring ? (
-          <svg width="12" height="12" viewBox="0 0 24 24" fill={INK}>
-            <rect x="5" y="5" width="14" height="14" />
-          </svg>
-        ) : (
-          <svg width="12" height="12" viewBox="0 0 24 24" fill={INK}>
-            <polygon points="6,4 20,12 6,20" />
-          </svg>
-        )}
-        {measuring ? "Stop" : "Start"}
-      </button>
-      <style>{`
-        .measure-breathe {
-          animation: measureBreathe 2.4s ease-in-out infinite;
-        }
-        @keyframes measureBreathe {
-          0%,
-          100% {
-            transform: translateY(0);
-            box-shadow: 4px 4px 0 ${INK};
-          }
-          50% {
-            transform: translateY(-3px);
-            box-shadow: 6px 7px 0 ${INK};
-          }
-        }
-      `}</style>
-    </>
   );
 }
 
@@ -361,24 +264,6 @@ const styles: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-  },
-  measureButton: {
-    position: "relative",
-    display: "flex",
-    alignItems: "center",
-    gap: 6,
-    background: PAPER,
-    color: INK,
-    border: `2px solid ${INK}`,
-    boxShadow: `4px 4px 0 ${INK}`,
-    padding: "8px 14px",
-    fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace",
-    fontSize: 12,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-    transition:
-      "background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease",
   },
   badge: {
     display: "flex",

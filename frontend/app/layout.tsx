@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { SessionProvider } from "next-auth/react";
 import "./globals.css";
 import Sidebar from "./components/Sidebar";
 
@@ -38,8 +39,10 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex h-full overflow-hidden">
-        <Sidebar />
-        <div className="app-content h-full min-w-0 flex-1 overflow-hidden">{children}</div>
+        <SessionProvider>
+          <Sidebar />
+          <div className="app-content h-full min-w-0 flex-1 overflow-hidden">{children}</div>
+        </SessionProvider>
       </body>
     </html>
   );

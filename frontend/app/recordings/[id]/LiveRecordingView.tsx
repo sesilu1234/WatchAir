@@ -3,53 +3,48 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LiveWaveform from "../../components/LiveWaveform";
 import { MONO } from "../../theme";
-import { getStatus, isRecordingState, stopRecording, type Recording } from "../../lib/api";
+import { isRecordingFinished, isRecordingStopping, stopRecording, type Recording } from "../../lib/api";
 import { useFrontendSocket } from "../../lib/useFrontendSocket";
 import { formatClock, formatTime, recordingName } from "../../lib/format";
 import { useCompact } from "../../lib/useCompact";
 import { BackLink, mobile, styles } from "./ui";
 
 // Vista de la grabación que está en curso ahora mismo (ended_at === null).
+// Cubre dos fases sin que la BD lleve un `status`: grabando (se puede parar)
+// y subiendo (tras el stop, hasta que llega recording_finished por WS).
 export default function LiveRecordingView({ recording }: { recording: Recording }) {
   const router = useRouter();
   const compact = useCompact();
-  const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // El desfase entre el reloj del navegador y el del server: sin esto la
-  // duración que se muestra puede salir desplazada varios segundos.
-  const syncClock = useCallback(() => {
-    getStatus()
-      .then((s) => setClockOffsetMs(s.clockOffsetMs))
-      .catch((err) => console.error(err));
-  }, []);
-
-  // Cuando el server anuncia que esta grabación ha terminado (stop desde otra
-  // pestaña, caída del ESP32…) se re-renderiza la ruta: el Server Component
-  // volverá a leer la fila y pasará a la vista de reproducción.
   const handleMessage = useCallback(
     (data: unknown) => {
-      if (isRecordingState(data) && !data.rec && data.recording.id === recording.id) {
+      if (isRecordingStopping(data) && data.uuid === recording.uuid) {
+        setUploading(true);
+        return;
+      }
+      if (isRecordingFinished(data) && data.uuid === recording.uuid) {
         router.refresh();
       }
     },
-    [recording.id, router],
+    [recording.uuid, router],
   );
 
-  const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: syncClock });
+  const wsStatus = useFrontendSocket({ onMessage: handleMessage });
 
   // 250 ms para que al entrar la duración real aparezca sin salto visible
   // (React descarta el render cuando el número no cambia).
   useEffect(() => {
     const startedAt = Date.parse(recording.started_at);
     const timer = setInterval(
-      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - clockOffsetMs - startedAt) / 1000))),
+      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000))),
       250,
     );
     return () => clearInterval(timer);
-  }, [recording.started_at, clockOffsetMs]);
+  }, [recording.started_at]);
 
   const handleStop = async () => {
     if (pending) return;
@@ -57,7 +52,7 @@ export default function LiveRecordingView({ recording }: { recording: Recording 
     setError(null);
     try {
       await stopRecording();
-      router.refresh(); // ended_at ya está puesto: recarga y pinta la gráfica
+      setUploading(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setPending(false);
@@ -74,12 +69,16 @@ export default function LiveRecordingView({ recording }: { recording: Recording 
           <span style={liveStyles.dotOuter}>
             <span style={liveStyles.dotInner} />
           </span>
-          <span style={liveStyles.badgeText}>Recording</span>
+          <span style={liveStyles.badgeText}>{uploading ? "Subiendo" : "Recording"}</span>
         </div>
         <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>
           {recordingName(recording.started_at)}
         </h1>
-        <p style={styles.subtitle}>Señal en tiempo real de la grabación en curso</p>
+        <p style={styles.subtitle}>
+          {uploading
+            ? "Grabación parada, subiendo el fichero desde la ESP32…"
+            : "Señal en tiempo real de la grabación en curso"}
+        </p>
       </header>
 
       <div style={{ ...styles.bar, ...(compact ? mobile.bar : null) }}>
@@ -100,20 +99,20 @@ export default function LiveRecordingView({ recording }: { recording: Recording 
         )}
         <button
           onClick={handleStop}
-          disabled={wsStatus !== "connected" || pending}
+          disabled={wsStatus !== "connected" || pending || uploading}
           style={{
             ...styles.button,
             ...styles.buttonStop,
             ...(compact ? mobile.button : null),
-            opacity: wsStatus !== "connected" || pending ? 0.5 : 1,
+            opacity: wsStatus !== "connected" || pending || uploading ? 0.5 : 1,
           }}
         >
           <StopIcon />
-          {pending ? "Parando…" : "Stop Recording"}
+          {uploading ? "Subiendo…" : pending ? "Parando…" : "Stop Recording"}
         </button>
       </div>
 
-      <LiveWaveform hideMeasurementButton />
+      <LiveWaveform />
 
       <style>{`
         @keyframes recBlink {

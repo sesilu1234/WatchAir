@@ -1,54 +1,79 @@
-// Cliente del backend FastAPI: comandos por HTTP, datos en vivo por WebSocket.
-// Una grabación se identifica por su UUID (el que devuelve /recording/start).
+// Cliente del frontend contra dos sitios distintos:
+// - server2 (FastAPI/EC2): solo control de grabación/emisión y el WS en vivo,
+//   siempre con el JWT corto que firma server1 (se pide y renueva aquí).
+// - rutas propias del frontend (/api/recordings, /api/devices, .../data):
+//   leen Supabase directo server-side, el navegador nunca toca Supabase.
 //
-// NEXT_PUBLIC_API_URL lleva el esquema incluido y sin barra final, p.ej.
-// "https://watchair.duckdns.org". El esquema importa: una página servida por
-// https no puede abrir ws:// ni http:// (mixed content), así que en cuanto el
-// frontend esté desplegado el backend tiene que ser https + wss.
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://13.48.132.12:8000";
+// NEXT_PUBLIC_SERVER2_URL lleva el esquema incluido y sin barra final. El
+// esquema importa: una página servida por https no puede abrir ws:// ni
+// http:// (mixed content).
+const SERVER2_URL = (process.env.NEXT_PUBLIC_SERVER2_URL ?? "").replace(/\/$/, "");
+const WS_SERVER2_BASE = SERVER2_URL.replace(/^http/, "ws");
 
-export const API_BASE = API_URL.replace(/\/$/, "");
-// http -> ws, https -> wss.
-export const WS_FRONTEND_URL = `${API_BASE.replace(/^http/, "ws")}/frontend`;
-
-// Fila de la tabla `recordings`. ended_at === null <=> se está grabando ahora.
 export type Recording = {
-  id: string;
-  client: string;
+  uuid: string;
+  device_uuid: string;
   started_at: string;
   ended_at: string | null;
-  samples: number;
+  file_path: string | null;
+  duration_seconds: number | null;
+  username: string;
 };
 
-export type ServerStatus = {
-  esp32_connected: boolean;
-  frontends_connected: number;
-  measuring: boolean;
-  recording: Recording | null;
-  server_time: string;
-};
+export type Device = { uuid: string; username: string };
 
-// El estado + cuánto adelanta el reloj del navegador respecto al del server.
-// Restándoselo a Date.now() los cronómetros cuentan sobre started_at sin desfase.
-export type StatusSnapshot = ServerStatus & { clockOffsetMs: number };
-
-// Mensajes que llegan por el WS de frontends.
-export type RecordingStateMessage = {
-  rec: boolean;
-  recording: Recording;
-  reason?: string;
-};
-export type SensorStateMessage = { state: string };
+// Mensajes que llegan por el WS de server2.
+export type DeviceOnlineMessage = { type: "device_online" | "device_offline"; uuid: string };
+export type RecordingStartedMessage = { type: "recording_started"; recording: Recording };
+export type RecordingStoppingMessage = { type: "recording_stopping"; uuid: string };
+export type RecordingFinishedMessage = { type: "recording_finished"; uuid: string };
 export type SampleMessage = { t: number; p: number; temp?: number };
 
-export const isRecordingState = (d: unknown): d is RecordingStateMessage =>
-  typeof d === "object" && d !== null && typeof (d as RecordingStateMessage).rec === "boolean";
+export const isDeviceOnline = (d: unknown): d is DeviceOnlineMessage =>
+  typeof d === "object" && d !== null && ((d as DeviceOnlineMessage).type === "device_online" || (d as DeviceOnlineMessage).type === "device_offline");
 
-export const isSensorState = (d: unknown): d is SensorStateMessage =>
-  typeof d === "object" && d !== null && typeof (d as SensorStateMessage).state === "string";
+export const isRecordingStarted = (d: unknown): d is RecordingStartedMessage =>
+  typeof d === "object" && d !== null && (d as RecordingStartedMessage).type === "recording_started";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store", ...init });
+export const isRecordingStopping = (d: unknown): d is RecordingStoppingMessage =>
+  typeof d === "object" && d !== null && (d as RecordingStoppingMessage).type === "recording_stopping";
+
+export const isRecordingFinished = (d: unknown): d is RecordingFinishedMessage =>
+  typeof d === "object" && d !== null && (d as RecordingFinishedMessage).type === "recording_finished";
+
+export const isSample = (d: unknown): d is SampleMessage =>
+  typeof d === "object" && d !== null && typeof (d as SampleMessage).p === "number";
+
+// --- Token corto contra server2: se pide a server1 y se cachea en memoria ---
+// (nunca en localStorage: dura 15 min y no tiene sentido persistirlo).
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
+export async function getServer2Token(forceRefresh = false): Promise<string> {
+  const now = Date.now();
+  if (!forceRefresh && cachedToken && cachedToken.expiresAt - now > 30_000) {
+    return cachedToken.token;
+  }
+  const res = await fetch("/api/server2-token", { cache: "no-store" });
+  if (!res.ok) throw new Error("No se pudo obtener el token de server2");
+  const { token, expiresIn } = (await res.json()) as { token: string; expiresIn: number };
+  cachedToken = { token, expiresAt: now + expiresIn * 1000 };
+  return token;
+}
+
+// Se llama en cada (re)conexión: si el WS se cerró por token caducado, esto
+// pide uno nuevo antes de reintentar.
+export async function buildServer2WsUrl(): Promise<string> {
+  const token = await getServer2Token();
+  return `${WS_SERVER2_BASE}/ws?token=${encodeURIComponent(token)}`;
+}
+
+async function server2Request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = await getServer2Token();
+  const res = await fetch(`${SERVER2_URL}${path}`, {
+    ...init,
+    headers: { ...(init?.headers ?? {}), Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
   if (!res.ok) {
     const detail = await res.json().catch(() => null);
     throw new Error(detail?.detail ?? `${path} -> ${res.status}`);
@@ -56,54 +81,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export const startSensor = () => request<{ ok: boolean }>("/sensor/start", { method: "POST" });
-export const stopSensor = () => request<{ ok: boolean }>("/sensor/stop", { method: "POST" });
+export const startRecording = () => server2Request<Recording>("/recordings/start", { method: "POST" });
+export const stopRecording = () =>
+  server2Request<{ uuid: string; device_uuid: string; status: string }>("/recordings/stop", { method: "POST" });
 
-export const startRecording = () => request<Recording>("/recording/start", { method: "POST" });
-export const stopRecording = () => request<Recording>("/recording/stop", { method: "POST" });
+// --- Lecturas: rutas propias del frontend (Supabase por debajo, nunca desde el navegador) ---
 
-export const listRecordings = () => request<Recording[]>("/recordings");
-
-// Mide el desfase de reloj en el punto medio de la petición: así el error queda
-// acotado por el RTT en vez de por la diferencia de hora entre las dos máquinas.
-export async function getStatus(): Promise<StatusSnapshot> {
-  const sentAt = Date.now();
-  const status = await request<ServerStatus>("/status");
-  const midpoint = (sentAt + Date.now()) / 2;
-  return { ...status, clockOffsetMs: midpoint - Date.parse(status.server_time) };
-}
-
-// null = no existe (404). Un fallo de red sí lanza: son casos distintos.
-export async function getRecording(id: string): Promise<Recording | null> {
-  const res = await fetch(`${API_BASE}/recordings/${encodeURIComponent(id)}`, {
-    cache: "no-store",
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`/recordings/${id} -> ${res.status}`);
+export async function listRecordings(
+  filters: { deviceUuid?: string; from?: string; to?: string } = {},
+): Promise<Recording[]> {
+  const qs = new URLSearchParams();
+  if (filters.deviceUuid) qs.set("device_uuid", filters.deviceUuid);
+  if (filters.from) qs.set("from", filters.from);
+  if (filters.to) qs.set("to", filters.to);
+  const suffix = qs.toString();
+  const res = await fetch(`/api/recordings${suffix ? `?${suffix}` : ""}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`/api/recordings -> ${res.status}`);
   return res.json();
 }
 
-export const recordingDataUrl = (id: string) =>
-  `${API_BASE}/recordings/${encodeURIComponent(id)}/data`;
+export async function listDevices(): Promise<Device[]> {
+  const res = await fetch("/api/devices", { cache: "no-store" });
+  if (!res.ok) throw new Error(`/api/devices -> ${res.status}`);
+  return res.json();
+}
 
-// Muestras de una grabación terminada, listas para ECharts: [segundos, presión].
-// El CSV guarda t_ms (millis del ESP32), así que se normaliza contra la primera.
-export async function fetchRecordingSamples(id: string): Promise<[number, number][]> {
-  const res = await fetch(recordingDataUrl(id), { cache: "no-store" });
-  if (!res.ok) throw new Error(`No se pudo descargar el CSV (${res.status})`);
-  const csv = await res.text();
-
-  const points: [number, number][] = [];
-  let t0: number | null = null;
-
-  for (const line of csv.split("\n")) {
-    const comma = line.indexOf(",");
-    if (comma < 0) continue; // cabecera "t_ms,p" y líneas vacías
-    const t = Number(line.slice(0, comma));
-    const p = Number(line.slice(comma + 1));
-    if (!Number.isFinite(t) || !Number.isFinite(p)) continue;
-    if (t0 === null) t0 = t;
-    points.push([(t - t0) / 1000, p]);
-  }
-  return points;
+// Puntos [segundos, presión|null] ya con la regla de gaps aplicada (null =
+// corte de línea). null en la presión, nunca en el tiempo.
+export async function fetchRecordingSamples(uuid: string): Promise<[number, number | null][]> {
+  const res = await fetch(`/api/recordings/${encodeURIComponent(uuid)}/data`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`No se pudieron descargar los datos (${res.status})`);
+  return res.json();
 }

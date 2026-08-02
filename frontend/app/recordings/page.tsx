@@ -1,14 +1,18 @@
 "use client";
 import Link from "next/link";
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useSession } from "next-auth/react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
-  getStatus,
-  isRecordingState,
-  isSensorState,
+  isDeviceOnline,
+  isRecordingFinished,
+  isRecordingStarted,
+  isRecordingStopping,
+  listDevices,
   listRecordings,
   startRecording,
   stopRecording,
+  type Device,
   type Recording,
 } from "../lib/api";
 import { useCompact } from "../lib/useCompact";
@@ -24,92 +28,131 @@ import {
 
 export default function RecordingsPage() {
   const compact = useCompact();
-  const [measuring, setMeasuring] = useState(false);
-  // active != null <=> hay una grabación en curso (la que no tiene ended_at).
-  const [active, setActive] = useState<Recording | null>(null);
-  // Date.now() - clockOffsetMs = hora del server: el cronómetro cuenta bien
-  // aunque el reloj del navegador esté desfasado.
-  const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const { data: session } = useSession();
+  const myDeviceUuid = session?.user?.deviceUuid ?? null;
+
+  const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
+  const [uploading, setUploading] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [filterDeviceUuid, setFilterDeviceUuid] = useState("");
+  const [filterDate, setFilterDate] = useState("");
 
-  const refreshRecordings = useCallback(() => {
-    listRecordings()
-      .then(setRecordings)
-      .catch((err) => console.error(err));
+  // Añade/actualiza una grabación en el estado local sin esperar a Supabase:
+  // al arrancar, server2 confirma "grabando" antes de que la fila termine de
+  // persistirse (ver notify_recording_started, fire-and-forget con reintentos),
+  // así que si esperásemos solo al refetch la UI se quedaría pegada en "idle".
+  const mergeRecording = useCallback((rec: Recording) => {
+    setRecordings((prev) =>
+      prev.some((r) => r.uuid === rec.uuid) ? prev : [rec, ...prev],
+    );
   }, []);
 
-  // Estado real del server: si al entrar ya hay una grabación en curso, la
-  // recuperamos con su started_at para seguir contando desde donde iba.
-  const syncStatus = useCallback(() => {
-    getStatus()
-      .then((s) => {
-        setActive(s.recording);
-        setMeasuring(s.measuring);
-        setClockOffsetMs(s.clockOffsetMs);
+  const refresh = useCallback(() => {
+    listRecordings()
+      .then((fetched) => {
+        setRecordings((prev) => {
+          // Conserva la grabación activa que ya conocemos (por la respuesta
+          // del start o por el WS) si Supabase todavía no la refleja.
+          const stillMissing = prev.filter(
+            (r) =>
+              r.device_uuid === myDeviceUuid &&
+              r.ended_at === null &&
+              !fetched.some((f) => f.uuid === r.uuid),
+          );
+          return [...stillMissing, ...fetched];
+        });
       })
       .catch((err) => console.error(err));
-  }, []);
+    listDevices()
+      .then(setDevices)
+      .catch((err) => console.error(err));
+  }, [myDeviceUuid]);
 
-  useEffect(() => {
-    syncStatus();
-    refreshRecordings();
-  }, [syncStatus, refreshRecordings]);
+  useEffect(refresh, [refresh]);
+
+  // La grabación activa de ESTA cuenta (grabando o subiendo): el WS solo
+  // suscribe al propio device, así que solo se puede arrancar/parar el tuyo.
+  const active = useMemo(
+    () => recordings.find((r) => r.device_uuid === myDeviceUuid && r.ended_at === null) ?? null,
+    [recordings, myDeviceUuid],
+  );
 
   const handleMessage = useCallback(
     (data: unknown) => {
-      if (isSensorState(data)) {
-        setMeasuring(data.state === "measuring");
+      if (isDeviceOnline(data)) {
+        setDeviceOnline(data.type === "device_online");
         return;
       }
-      if (isRecordingState(data)) {
-        setActive(data.rec ? data.recording : null);
-        if (!data.rec) refreshRecordings();
+      if (isRecordingStarted(data)) {
+        mergeRecording(data.recording);
+        return;
+      }
+      if (isRecordingFinished(data)) {
+        refresh();
+        return;
+      }
+      if (isRecordingStopping(data)) {
+        setUploading(true);
       }
     },
-    [refreshRecordings],
+    [refresh, mergeRecording],
   );
 
-  // onOpen re-sincroniza tras cada reconexión
-  const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: syncStatus });
+  const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: refresh });
 
-  // Cronómetro de la grabación en curso. Se refresca cada 250 ms para que al
-  // entrar en la página el valor real aparezca sin salto visible (React descarta
-  // el render cuando el número no cambia, así que sale gratis).
+  // Cronómetro de la grabación en curso. 250 ms para que al entrar el valor
+  // real aparezca sin salto visible (React descarta el render si no cambia).
   useEffect(() => {
-    if (active == null) return;
+    if (active == null) {
+      setUploading(false);
+      return;
+    }
     const startedAt = Date.parse(active.started_at);
     const id = setInterval(
-      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - clockOffsetMs - startedAt) / 1000))),
+      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000))),
       250,
     );
     return () => clearInterval(id);
-  }, [active, clockOffsetMs]);
+  }, [active]);
 
-  const run = async (action: () => Promise<Recording>) => {
+  const run = async (action: () => Promise<unknown>, afterUpload = false) => {
     if (pending) return;
     setPending(true);
     setError(null);
     try {
-      const rec = await action();
-      setActive(rec.ended_at === null ? rec : null);
-      if (rec.ended_at !== null) refreshRecordings();
+      await action();
+      if (afterUpload) setUploading(true);
+      refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // Un fallo de start/stop suele significar que el frontend iba con estado
+      // atrasado respecto a server2 (p.ej. 409 "ya hay una grabación en
+      // curso"); re-sincroniza para que el panel salte al que corresponde en
+      // vez de dejar visible el botón equivocado.
+      refresh();
     } finally {
       setPending(false);
     }
   };
 
-  const history = recordings.filter((r) => r.id !== active?.id);
+  const history = useMemo(
+    () =>
+      recordings
+        .filter((r) => r.uuid !== active?.uuid)
+        .filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid)
+        .filter((r) => !filterDate || r.started_at.slice(0, 10) === filterDate),
+    [recordings, active, filterDeviceUuid, filterDate],
+  );
 
   return (
     <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <header style={styles.header}>
         <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>Grabaciones</h1>
-        <p style={styles.subtitle}>Historial de sesiones respiratorias</p>
+        <p style={styles.subtitle}>Historial de sesiones respiratorias · todas las cuentas</p>
       </header>
 
       <div style={{ ...styles.split, ...(compact ? mobile.split : null) }}>
@@ -118,18 +161,20 @@ export default function RecordingsPage() {
             <RecordingNowPanel
               active={active}
               elapsedSeconds={elapsedSeconds}
-              measuring={measuring}
+              uploading={uploading}
+              deviceOnline={deviceOnline}
               wsStatus={wsStatus}
               pending={pending}
               error={error}
-              onStop={() => run(stopRecording)}
+              onStop={() => run(stopRecording, true)}
             />
           ) : (
             <NewRecordingPanel
+              deviceOnline={deviceOnline}
               wsStatus={wsStatus}
               pending={pending}
               error={error}
-              onStart={() => run(startRecording)}
+              onStart={() => run(async () => mergeRecording(await startRecording()))}
             />
           )}
         </div>
@@ -144,6 +189,15 @@ export default function RecordingsPage() {
             </div>
             <span style={styles.listCountPill}>{history.length} grabaciones</span>
           </div>
+
+          <FilterBar
+            devices={devices}
+            deviceUuid={filterDeviceUuid}
+            date={filterDate}
+            onDeviceChange={setFilterDeviceUuid}
+            onDateChange={setFilterDate}
+          />
+
           <div style={styles.tableHead}>
             <span style={styles.tableHeadIconCol} />
             <span style={styles.tableHeadCell}>Grabación</span>
@@ -155,10 +209,10 @@ export default function RecordingsPage() {
                 <span style={styles.emptyIcon}>
                   <WaveIcon />
                 </span>
-                Todavía no hay grabaciones.
+                {recordings.length === 0 ? "Todavía no hay grabaciones." : "Nada con estos filtros."}
               </div>
             ) : (
-              history.map((r) => <RecordingRow key={r.id} recording={r} />)
+              history.map((r) => <RecordingRow key={r.uuid} recording={r} />)
             )}
           </div>
         </div>
@@ -167,14 +221,67 @@ export default function RecordingsPage() {
   );
 }
 
+// --- Filtro por usuario y fecha ---
+
+function FilterBar({
+  devices,
+  deviceUuid,
+  date,
+  onDeviceChange,
+  onDateChange,
+}: {
+  devices: Device[];
+  deviceUuid: string;
+  date: string;
+  onDeviceChange: (v: string) => void;
+  onDateChange: (v: string) => void;
+}) {
+  return (
+    <div style={styles.filterBar}>
+      <select
+        value={deviceUuid}
+        onChange={(e) => onDeviceChange(e.target.value)}
+        style={styles.filterSelect}
+      >
+        <option value="">Todos los usuarios</option>
+        {devices.map((d) => (
+          <option key={d.uuid} value={d.uuid}>
+            {d.username}
+          </option>
+        ))}
+      </select>
+      <input
+        type="date"
+        value={date}
+        onChange={(e) => onDateChange(e.target.value)}
+        style={styles.filterSelect}
+      />
+      {(deviceUuid || date) && (
+        <button
+          type="button"
+          onClick={() => {
+            onDeviceChange("");
+            onDateChange("");
+          }}
+          style={styles.filterClear}
+        >
+          Limpiar
+        </button>
+      )}
+    </div>
+  );
+}
+
 // --- Panel superior: idle ---
 
 function NewRecordingPanel({
+  deviceOnline,
   wsStatus,
   pending,
   error,
   onStart,
 }: {
+  deviceOnline: boolean | null;
   wsStatus: WsStatus;
   pending: boolean;
   error: string | null;
@@ -182,12 +289,12 @@ function NewRecordingPanel({
 }) {
   const compact = useCompact();
   const [hovered, setHovered] = useState(false);
-  const disabled = wsStatus !== "connected" || pending;
+  const disabled = wsStatus !== "connected" || deviceOnline !== true || pending;
   const hover = hovered && !disabled;
 
   return (
     <div style={{ ...styles.idlePanel, ...(compact ? mobile.idlePanel : null) }}>
-      <ConnectionBadge status={wsStatus} />
+      <ConnectionBadge wsStatus={wsStatus} deviceOnline={deviceOnline} />
       <button
         onClick={onStart}
         disabled={disabled}
@@ -212,19 +319,22 @@ function NewRecordingPanel({
         <p style={styles.idleHint}>
           {wsStatus !== "connected"
             ? "Esperando conexión con el servidor…"
-            : "Pulsa para empezar a registrar la señal respiratoria."}
+            : deviceOnline !== true
+              ? "Tu ESP32 no está conectada."
+              : "Pulsa para empezar a registrar la señal respiratoria."}
         </p>
       )}
     </div>
   );
 }
 
-// --- Panel superior: grabando ---
+// --- Panel superior: grabando / subiendo ---
 
 function RecordingNowPanel({
   active,
   elapsedSeconds,
-  measuring,
+  uploading,
+  deviceOnline,
   wsStatus,
   pending,
   error,
@@ -232,7 +342,8 @@ function RecordingNowPanel({
 }: {
   active: Recording;
   elapsedSeconds: number;
-  measuring: boolean;
+  uploading: boolean;
+  deviceOnline: boolean | null;
   wsStatus: WsStatus;
   pending: boolean;
   error: string | null;
@@ -245,14 +356,16 @@ function RecordingNowPanel({
       <div style={styles.liveHeaderRow}>
         <div style={styles.liveTitleGroup}>
           <span style={styles.recDot} />
-          <span style={styles.liveTitle}>Recording Now</span>
+          <span style={styles.liveTitle}>{uploading ? "Subiendo" : "Recording Now"}</span>
         </div>
         <span style={styles.liveConnText}>
           {wsStatus !== "connected"
             ? "Reconectando…"
-            : measuring
-              ? "ESP32 Conectado · Recibiendo datos…"
-              : "ESP32 Conectado · Esperando datos…"}
+            : deviceOnline !== true
+              ? "ESP32 desconectada"
+              : uploading
+                ? "Subiendo el fichero…"
+                : "ESP32 Conectada · Grabando…"}
         </span>
       </div>
 
@@ -279,7 +392,7 @@ function RecordingNowPanel({
 
       <div style={styles.liveActions}>
         <Link
-          href={`/recordings/${active.id}`}
+          href={`/recordings/${active.uuid}`}
           style={{
             ...styles.actionBtn,
             ...styles.actionBtnGhost,
@@ -290,15 +403,15 @@ function RecordingNowPanel({
         </Link>
         <button
           onClick={onStop}
-          disabled={pending}
+          disabled={pending || uploading}
           style={{
             ...styles.actionBtn,
             ...styles.actionBtnStop,
             ...(compact ? mobile.actionBtn : null),
-            opacity: pending ? 0.6 : 1,
+            opacity: pending || uploading ? 0.6 : 1,
           }}
         >
-          Stop
+          {uploading ? "Subiendo…" : "Stop"}
         </button>
         {error != null && <span style={styles.errorInline}>{error}</span>}
       </div>
@@ -316,7 +429,7 @@ function RecordingRow({ recording }: { recording: Recording }) {
 
   return (
     <Link
-      href={`/recordings/${recording.id}`}
+      href={`/recordings/${recording.uuid}`}
       style={{
         ...styles.row,
         background: hover ? "rgba(0,224,168,0.08)" : "transparent",
@@ -331,23 +444,26 @@ function RecordingRow({ recording }: { recording: Recording }) {
       <div style={{ ...styles.rowMain, ...(compact ? mobile.rowMain : null) }}>
         <span style={styles.rowName}>{recordingName(recording.started_at)}</span>
         <span style={{ ...styles.rowMeta, ...(compact ? mobile.rowMeta : null) }}>
-          {formatRelativeDate(date)} · {formatTime(date)} · {formatNumber(recording.samples)}{" "}
-          muestras
+          {recording.username} · {formatRelativeDate(date)} · {formatTime(date)}
         </span>
       </div>
-      <span style={styles.rowDuration}>{seconds == null ? "En curso" : formatClock(seconds)}</span>
+      <span style={styles.rowDuration}>{seconds == null ? "Subiendo" : formatClock(seconds)}</span>
       <ChevronIcon />
     </Link>
   );
 }
 
-function ConnectionBadge({ status }: { status: WsStatus }) {
-  const config = {
-    connected: { color: "#00e0a8", text: "Servidor Conectado" },
-    connecting: { color: "#ca8a04", text: "Conectando" },
-    disconnected: { color: "#dc2626", text: "Desconectado" },
-    error: { color: "#dc2626", text: "Error de red" },
-  }[status];
+function ConnectionBadge({ wsStatus, deviceOnline }: { wsStatus: WsStatus; deviceOnline: boolean | null }) {
+  const config = (() => {
+    if (wsStatus !== "connected") {
+      return {
+        connecting: { color: "#ca8a04", text: "Conectando" },
+        disconnected: { color: "#dc2626", text: "Desconectado" },
+        error: { color: "#dc2626", text: "Error de red" },
+      }[wsStatus as "connecting" | "disconnected" | "error"];
+    }
+    return deviceOnline ? { color: "#00e0a8", text: "ESP32 Conectada" } : { color: "#dc2626", text: "ESP32 Desconectada" };
+  })();
 
   return (
     <div style={{ ...styles.badge, background: config.color }}>
@@ -447,7 +563,7 @@ const styles: Record<string, CSSProperties> = {
   },
   bottomPane: {
     flexShrink: 0,
-    height: 252,
+    height: 300,
     display: "flex",
     flexDirection: "column",
     background: "#ffffff",
@@ -639,6 +755,35 @@ const styles: Record<string, CSSProperties> = {
     padding: "3px 10px",
     textTransform: "uppercase",
     letterSpacing: "0.04em",
+  },
+  filterBar: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 10,
+    flexShrink: 0,
+    flexWrap: "wrap",
+  },
+  filterSelect: {
+    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: 700,
+    color: INK,
+    background: PAPER,
+    border: `1.5px solid ${INK}`,
+    padding: "6px 10px",
+    textTransform: "uppercase",
+  },
+  filterClear: {
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 700,
+    color: "#888",
+    background: "transparent",
+    border: "1px solid rgba(17,17,17,0.2)",
+    borderRadius: 999,
+    padding: "6px 12px",
+    textTransform: "uppercase",
+    cursor: "pointer",
   },
   tableHead: {
     display: "flex",

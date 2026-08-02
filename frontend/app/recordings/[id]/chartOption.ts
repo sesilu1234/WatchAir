@@ -2,7 +2,9 @@ import type { ECharts, EChartsOption } from "echarts";
 import { formatNumber } from "../../lib/format";
 import { ACCENT, INK, MONO, PAPER } from "../../theme";
 
-export type Points = [number, number][];
+// y = null marca un hueco (regla de gaps): ECharts corta la línea ahí en vez
+// de unir dos muestras separadas por más de 2×LOOP_TIME (ver binaryFormat.ts).
+export type Points = [number, number | null][];
 
 // Lo que cambia según dónde se esté pintando la gráfica: pantalla pequeña y/o
 // pantalla completa.
@@ -32,7 +34,10 @@ export function rangeIndex(range: number): number {
 // el percentil 99 y no por el máximo, porque un pico suelto (un golpe al
 // sensor) no tiene por qué dejar la señal aplastada en una franja del centro.
 export function defaultRange(points: Points): number {
-  const amplitudes = points.map(([, p]) => Math.abs(p)).sort((a, b) => a - b);
+  const amplitudes = points
+    .map(([, p]) => (p === null ? null : Math.abs(p)))
+    .filter((v): v is number => v !== null)
+    .sort((a, b) => a - b);
   const p99 = amplitudes[Math.floor((amplitudes.length - 1) * 0.99)];
   return nearestRange(p99 * 1.3);
 }
@@ -149,10 +154,11 @@ export function chartOption(points: Points, view: ChartView, range: number): ECh
       textStyle: { fontFamily: MONO, color: INK, fontSize: 12 },
       formatter: (params) => {
         const first = Array.isArray(params) ? params[0] : params;
-        const [t, p] = first.value as [number, number];
-        // el valor manda, la etiqueta acompaña
+        const [t, p] = first.value as [number, number | null];
+        // el valor manda, la etiqueta acompaña; en un hueco no hay presión que mostrar
+        const value = p === null ? "—" : `${p.toFixed(2)} Pa`;
         return (
-          `<div style="font-weight:900;font-size:15px">${p.toFixed(2)} Pa</div>` +
+          `<div style="font-weight:900;font-size:15px">${value}</div>` +
           `<div style="color:#666;font-size:11px;margin-top:2px">t = ${axisTime(t)}</div>`
         );
       },

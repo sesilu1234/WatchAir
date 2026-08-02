@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { signOut, useSession } from "next-auth/react";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import { useCompact } from "../lib/useCompact";
@@ -24,6 +25,7 @@ const NAV_ITEMS: NavItem[] = [
 export default function Sidebar() {
   const pathname = usePathname();
   const compact = useCompact();
+  const { data: session } = useSession();
   const [collapsed, setCollapsed] = useState(false);
   const [toggleHovered, setToggleHovered] = useState(false);
 
@@ -33,6 +35,11 @@ export default function Sidebar() {
     const frame = requestAnimationFrame(() => setCollapsed(true));
     return () => cancelAnimationFrame(frame);
   }, []);
+
+  // Chrome propio de /login: sin nav, sin usuario. Va después de los hooks:
+  // el layout no desmonta la sidebar entre rutas, así que el orden de hooks
+  // tiene que ser el mismo en cada render.
+  if (pathname === "/login") return null;
 
   const toggle = () => {
     setCollapsed((prev) => {
@@ -95,12 +102,17 @@ export default function Sidebar() {
       </nav>
 
       {/* Usuario */}
-      <div style={{ ...s.userRow, ...(collapsed ? s.navItemCollapsed : null) }}>
-        <div style={s.avatar}>U</div>
+      <button
+        type="button"
+        onClick={() => signOut({ callbackUrl: "/login" })}
+        title="Cerrar sesión"
+        style={{ ...s.userRow, ...(collapsed ? s.navItemCollapsed : null) }}
+      >
+        <div style={s.avatar}>{(session?.user?.username ?? "?").charAt(0).toUpperCase()}</div>
         <FadeText collapsed={collapsed}>
-          <span style={s.userName}>Usuario</span>
+          <span style={s.userName}>{session?.user?.username ?? "…"}</span>
         </FadeText>
-      </div>
+      </button>
 
       {/* Botón de colapso, en el borde */}
       <button
@@ -347,6 +359,13 @@ const s: Record<string, CSSProperties> = {
     gap: 10,
     padding: "14px 16px",
     boxSizing: "border-box",
+    width: "100%",
+    border: "none",
+    background: "transparent",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+    color: INK,
   },
   avatar: {
     flexShrink: 0,
