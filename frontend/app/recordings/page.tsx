@@ -770,8 +770,10 @@ const styles: Record<string, CSSProperties> = {
     color: INK,
     background: PAPER,
     border: `1.5px solid ${INK}`,
-    padding: "6px 10px",
+    borderRadius: 10,
+    padding: "6px 12px",
     textTransform: "uppercase",
+    cursor: "pointer",
   },
   filterClear: {
     fontFamily: MONO,
@@ -780,7 +782,7 @@ const styles: Record<string, CSSProperties> = {
     color: "#888",
     background: "transparent",
     border: "1px solid rgba(17,17,17,0.2)",
-    borderRadius: 999,
+    borderRadius: 10, // mismo radio que los selects: la fila se lee como una sola pieza
     padding: "6px 12px",
     textTransform: "uppercase",
     cursor: "pointer",

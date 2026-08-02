@@ -3,6 +3,10 @@
 #include "secrets.h"
 #include <ArduinoJson.h>
 
+// Lo mantiene main.cpp con el resultado de la última lectura I2C: es la
+// precondición "sensor respondiendo" del start.
+extern bool sensorOk;
+
 UploadState uploadState;
 
 // --- CRC32 estilo zlib (poly 0xEDB88320, init/final 0xFFFFFFFF) — tiene que
@@ -65,10 +69,14 @@ void sendSample(WebSocketsClient& ws, uint32_t tMs, float pressure, float temp) 
   ws.sendTXT(buf);
 }
 
-static void sendRecordingAck(WebSocketsClient& ws, const String& uuid) {
+// rec=false + motivo cuando falla alguna precondición del start: así el
+// browser ve el porqué en vez de esperar a que expire el timeout del ACK.
+static void sendRecordingAck(WebSocketsClient& ws, const String& uuid, bool ok, const char* reason) {
   JsonDocument doc;
   doc["type"] = "recording_ack";
   doc["uuid"] = uuid;
+  doc["rec"] = ok;
+  if (!ok) doc["reason"] = reason;
   String out;
   serializeJson(doc, out);
   ws.sendTXT(out);
@@ -113,7 +121,7 @@ void maybeStartUpload(WebSocketsClient& ws) {
   if (pending.empty()) return;
 
   const PendingUpload& p = pending[0];
-  uint32_t finalSize = recorder.prepareForUpload(p.uuid);
+  uint32_t finalSize = recorder.sizeOf(p.uuid);
   if (finalSize == 0) return;
 
   uploadState = UploadState{};
@@ -183,13 +191,18 @@ void handleServerText(WebSocketsClient& ws, uint8_t* payload, size_t len, bool& 
   }
   if (strcmp(type, "start_recording") == 0) {
     String uuid = doc["uuid"] | "";
-    // Si ya había una grabación local sin confirmar (ACK perdido), start()
-    // devuelve false porque recording_ sigue true: se descarta la vieja y se
-    // arranca de cero con la nueva, tal como espera server2.
-    if (uuid.length() > 0) {
-      if (recorder.isRecording()) recorder.stop();
-      if (recorder.start(uuid)) sendRecordingAck(ws, uuid);
+    if (uuid.length() == 0) return;
+    // start con un uuid distinto al que graba: se cierra y descarta la vieja y
+    // se arranca de cero con la nueva, tal como espera server2.
+    if (recorder.isRecording()) {
+      if (recorder.currentUuid() == uuid) {  // idempotente: ya la estábamos grabando
+        sendRecordingAck(ws, uuid, true, "");
+        return;
+      }
+      recorder.stop();
     }
+    const char* err = recorder.start(uuid, sensorOk);
+    sendRecordingAck(ws, uuid, err[0] == '\0', err);
     return;
   }
   if (strcmp(type, "stop_recording") == 0) {

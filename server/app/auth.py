@@ -30,7 +30,3 @@ def verify_browser_token(token: str) -> BrowserClaims:
     if not isinstance(email, str) or not isinstance(device_uuid, str) or not isinstance(exp, (int, float)):
         raise InvalidToken("Faltan claims email/uuid_device/exp")
     return BrowserClaims(email=email, device_uuid=device_uuid, exp=exp)
-
-
-def verify_device(uuid: str, secret: str) -> bool:
-    return secret == config.DEVICE_SECRET and uuid in config.PROVISIONED_DEVICE_UUIDS

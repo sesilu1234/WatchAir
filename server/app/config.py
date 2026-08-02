@@ -1,16 +1,5 @@
-import json
 import os
 from pathlib import Path
-
-# server2 no toca Supabase: solo necesita saber qué UUID de device son válidos
-# para el gate de auth del WS del ESP32. El resto (username/email) vive en
-# Supabase y lo lee el frontend.
-_DEVICES_FILE = Path(__file__).resolve().parent.parent / "devices.json"
-
-
-def _load_provisioned_uuids() -> set[str]:
-    data = json.loads(_DEVICES_FILE.read_text(encoding="utf-8"))
-    return set(data["uuids"])
 
 
 def _require(name: str) -> str:
@@ -22,21 +11,25 @@ def _require(name: str) -> str:
 
 JWT_SHARED_SECRET = _require("JWT_SHARED_SECRET")
 DEVICE_SECRET = _require("DEVICE_SECRET")
-INTERNAL_API_SECRET = _require("INTERNAL_API_SECRET")
-FRONTEND_URL = _require("FRONTEND_URL").rstrip("/")
 
-PROVISIONED_DEVICE_UUIDS = _load_provisioned_uuids()
+# server2 es el unico que escribe en Supabase (Postgres + Storage). El frontend
+# solo lee `devices` para resolver email -> uuid del aparato en el login.
+SUPABASE_URL = _require("SUPABASE_URL").rstrip("/")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 
-# --- Protocolo ---
-HEARTBEAT_INTERVAL_S = 2
-ONLINE_TIMEOUT_S = 7  # last_seen más viejo que esto -> offline
-# 3s (apenas 1 heartbeat de margen sobre HEARTBEAT_INTERVAL_S) era demasiado
-# ajustado: un solo loop() lento en el ESP32 (una lectura de SD, un retransmit
-# WiFi) bastaba para marcar el device offline y forzar una reconexión — visto
-# en producción como un ciclo conectado/desconectado cada pocos segundos.
-RECONCILE_GRACE_S = 3  # tiempo que se tolera un desajuste deseado/reportado antes de reenviar el comando
-RECORDING_ACK_TIMEOUT_S = 5
-LOOP_TIME_MS = 40  # 25 Hz, tiene que coincidir con el firmware
+# Aprovisionamiento hardcodeado: un aparato por usuario. Solo se usa para el
+# gate de auth del WS del ESP32; el username/email vive en Supabase.
+DEVICE_UUIDS = {
+    "8d257ddd-79bc-4fc7-969c-8ba42d315b22",  # Ulises
+    "01bbe27b-7b83-4247-839e-0826b23f473c",  # Angela
+    "af87778a-9e0c-4445-ad5e-62d78943272e",  # Minerva
+}
 
-UPLOADS_DIR = Path(__file__).resolve().parent.parent / "uploads"
-UPLOADS_DIR.mkdir(exist_ok=True)
+# 3 s (un solo heartbeat de margen) era demasiado ajustado: un loop() lento en
+# el ESP32 bastaba para marcarlo offline y forzar reconexion en bucle.
+ONLINE_TIMEOUT_S = 7
+RECONCILE_GRACE_S = 3  # desajuste deseado/reportado que se tolera antes de reenviar
+ACK_TIMEOUT_S = 5
+
+UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)

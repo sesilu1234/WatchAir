@@ -1,8 +1,0 @@
-{
-  "_comment": "UUIDs de device provisionados. Solo para el gate de auth WS del ESP32 en server2 (no lleva username/email: eso vive únicamente en Supabase, leído por el frontend). Debe coincidir con los INSERT de server/migrations/001_init.sql.",
-  "uuids": [
-    "8d257ddd-79bc-4fc7-969c-8ba42d315b22",
-    "01bbe27b-7b83-4247-839e-0826b23f473c",
-    "af87778a-9e0c-4445-ad5e-62d78943272e"
-  ]
-}

@@ -58,49 +58,6 @@ export async function downloadRecordingFile(filePath: string): Promise<Buffer> {
   return Buffer.from(await data.arrayBuffer());
 }
 
-// --- Escrituras: solo las llaman las rutas /api/internal/*, nunca el navegador ---
-
-export async function insertRecordingStarted(row: {
-  uuid: string;
-  device_uuid: string;
-  started_at: string;
-}): Promise<void> {
-  // upsert+ignoreDuplicates en vez de insert: server2 puede reintentar esto (o
-  // reconciliar el mismo uuid en cada reconexión del ESP32 vía hello) sin que
-  // la fila ya existente reviente por choque de primary key.
-  const { error } = await supabaseAdmin
-    .from("recordings")
-    .upsert(row, { onConflict: "uuid", ignoreDuplicates: true });
-  if (error) throw new Error(`No se pudo crear la fila de grabación ${row.uuid}: ${error.message}`);
-}
-
-export async function completeRecording(params: {
-  uuid: string;
-  deviceUuid: string;
-  data: Buffer;
-}): Promise<void> {
-  const { uuid, deviceUuid, data } = params;
-
-  const { data: row, error: fetchError } = await supabaseAdmin
-    .from("recordings")
-    .select("started_at")
-    .eq("uuid", uuid)
-    .maybeSingle();
-  if (fetchError) throw new Error(`No se pudo leer la grabación ${uuid}: ${fetchError.message}`);
-  if (!row) throw new Error(`Grabación ${uuid} no existe (¿no se creó al arrancar?)`);
-
-  const filePath = `${deviceUuid}/${uuid}.bin`;
-  const { error: uploadError } = await supabaseAdmin.storage
-    .from(STORAGE_BUCKET)
-    .upload(filePath, data, { contentType: "application/octet-stream", upsert: true });
-  if (uploadError) throw new Error(`No se pudo subir ${filePath}: ${uploadError.message}`);
-
-  const endedAt = new Date();
-  const durationSeconds = Math.round((endedAt.getTime() - Date.parse(row.started_at)) / 1000);
-
-  const { error: updateError } = await supabaseAdmin
-    .from("recordings")
-    .update({ ended_at: endedAt.toISOString(), file_path: filePath, duration_seconds: durationSeconds })
-    .eq("uuid", uuid);
-  if (updateError) throw new Error(`No se pudo cerrar la grabación ${uuid}: ${updateError.message}`);
-}
+// Las escrituras (crear la fila, subir el .bin a Storage, cerrar la grabación)
+// las hace server2 directamente contra Supabase — ver server/app/db.py. Aquí
+// solo quedan lecturas.

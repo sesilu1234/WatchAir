@@ -29,6 +29,7 @@ unsigned long lastPrint = 0;
 bool broadcasting = false; // estado derivado: lo decide server2 (start/stop_broadcast)
 bool ntpSynced = false;
 bool sdReady = false;
+bool sensorOk = false; // última lectura I2C correcta; precondición del start
 
 void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
   switch (type) {
@@ -51,11 +52,12 @@ void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
 
 void trySyncNtp() {
   if (ntpSynced) return;
-  if (time(nullptr) > 1700000000) { // fecha "razonable": NTP ya resolvió la hora real
-    ntpSynced = true;
-    recorder.onNtpSynced();
-    Serial.println("NTP sincronizado");
-  }
+  if (!timeIsSynced()) return;
+  ntpSynced = true;
+  Serial.println("NTP sincronizado");
+  // Solo ahora se puede reanudar: sin hora real no hay con qué sellar las
+  // muestras del tramo posterior al reinicio.
+  if (sdReady) recorder.resumeIfPending();
 }
 
 void setup() {
@@ -149,16 +151,17 @@ void loop() {
   if (millis() - lastSample >= LOOP_TIME_MS) {
     lastSample = millis();
     float p, t;
-    if (sdp.readMeasurement(p, t) == 0) {
+    sensorOk = (sdp.readMeasurement(p, t) == 0);
+    if (sensorOk) {
       p = -(-p); // canula en el puerto opuesto -> invierte signo (quita esta linea si no aplica)
-      uint32_t tMs = millis();
 
+      // Grabar y emitir son independientes: la misma muestra va a una, a otra,
+      // a las dos o a ninguna.
       if (sdReady && recorder.isRecording()) {
-        int16_t pCentiPa = (int16_t)round(p * 100.0f);
-        recorder.sample(tMs, pCentiPa);
+        recorder.sample((int16_t)round(p * 100.0f));
       }
       if (broadcasting && ws.isConnected()) {
-        sendSample(ws, tMs, p, t);
+        sendSample(ws, millis(), p, t);
       }
     }
   }
