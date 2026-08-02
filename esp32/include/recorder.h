@@ -57,8 +57,9 @@ class Recorder {
 
   // --- subida ---
   std::vector<PendingUpload> listPending();  // /rec/*.bin salvo la que se graba ahora
-  uint32_t sizeOf(const String& uuid);
-  size_t readChunk(const String& uuid, uint32_t offset, uint8_t* buf, size_t maxLen);
+  // Handle abierto para que HTTPClient lo streamee tal cual (File es un Stream).
+  // Un solo open por subida, no uno por trozo. Devuelve un File falsy si no está.
+  File openBin(const String& uuid);
   void confirmUploaded(const String& uuid);  // borra el .bin de la SD
 
  private:

@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 
 def _require(name: str) -> str:
@@ -31,5 +30,7 @@ ONLINE_TIMEOUT_S = 7
 RECONCILE_GRACE_S = 3  # desajuste deseado/reportado que se tolera antes de reenviar
 ACK_TIMEOUT_S = 5
 
-UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Tope de 12 h a 25 Hz (6 B por muestra) = 6,5 MB. El margen es para no rechazar
+# una grabacion legitima por un cambio de formato; el cuerpo se lee en memoria,
+# asi que el limite es lo unico que evita que un POST cualquiera la agote.
+MAX_UPLOAD_BYTES = 16 * 1024 * 1024

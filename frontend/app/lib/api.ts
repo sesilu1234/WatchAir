@@ -27,6 +27,15 @@ export type DeviceOnlineMessage = { type: "device_online" | "device_offline"; uu
 export type RecordingStartedMessage = { type: "recording_started"; recording: Recording };
 export type RecordingStoppingMessage = { type: "recording_stopping"; uuid: string };
 export type RecordingFinishedMessage = { type: "recording_finished"; uuid: string };
+// Estado real del aparato, derivado de su heartbeat (cada 2 s). Es lo que
+// distingue "grabando" de "subiendo" cuando no hemos visto el recording_stopping
+// — p. ej. si server2 se reinició, o si el browser entra a mitad de una subida.
+export type DeviceStatusMessage = {
+  type: "device_status";
+  uuid: string;
+  recording: boolean;
+  uploading: boolean;
+};
 export type SampleMessage = { t: number; p: number; temp?: number };
 
 export const isDeviceOnline = (d: unknown): d is DeviceOnlineMessage =>
@@ -40,6 +49,9 @@ export const isRecordingStopping = (d: unknown): d is RecordingStoppingMessage =
 
 export const isRecordingFinished = (d: unknown): d is RecordingFinishedMessage =>
   typeof d === "object" && d !== null && (d as RecordingFinishedMessage).type === "recording_finished";
+
+export const isDeviceStatus = (d: unknown): d is DeviceStatusMessage =>
+  typeof d === "object" && d !== null && (d as DeviceStatusMessage).type === "device_status";
 
 export const isSample = (d: unknown): d is SampleMessage =>
   typeof d === "object" && d !== null && typeof (d as SampleMessage).p === "number";

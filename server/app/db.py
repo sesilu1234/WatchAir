@@ -29,9 +29,19 @@ def insert_recording(uuid: str, device_uuid: str, started_at: str):
 def complete_recording(uuid: str, device_uuid: str, data: bytes):
     """Sube el binario a Storage y cierra la fila. `ended_at` con valor +
     `file_path` con valor = grabacion completa (el estado es derivado)."""
-    row = _client.table("recordings").select("started_at").eq("uuid", uuid).maybe_single().execute()
+    row = (
+        _client.table("recordings")
+        .select("started_at, device_uuid")
+        .eq("uuid", uuid)
+        .maybe_single()
+        .execute()
+    )
     if row is None or row.data is None:
         raise RuntimeError(f"la grabacion {uuid} no tiene fila en la BD")
+    # DEVICE_SECRET es el mismo para todos los aparatos: sin esto, cualquiera de
+    # ellos podria cerrar (y pisar el fichero de) la grabacion de otro.
+    if row.data["device_uuid"] != device_uuid:
+        raise RuntimeError(f"la grabacion {uuid} no es del aparato {device_uuid}")
 
     file_path = f"{device_uuid}/{uuid}.bin"
     _client.storage.from_(BUCKET).upload(

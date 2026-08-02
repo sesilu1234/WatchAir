@@ -1,9 +1,7 @@
 import asyncio
 import logging
 import uuid as uuid_lib
-import zlib
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import HTTPException
 
@@ -79,6 +77,32 @@ async def stop(claims: BrowserClaims) -> dict:
     return {"uuid": rec_uuid, "device_uuid": dev.uuid, "status": "subiendo"}
 
 
+def device_status(dev: hub.Device) -> dict:
+    """Lo que esta haciendo el aparato ahora mismo, para los browsers."""
+    return {
+        "type": "device_status",
+        "uuid": dev.uuid,
+        "recording": bool(dev.recording_now),
+        "uploading": bool(dev.uploading),
+    }
+
+
+async def reconcile_heartbeat(dev: hub.Device, recording: bool, uploading: bool):
+    """El heartbeat (cada 2 s) es la unica fuente continua de estado: el hello
+    solo cuenta lo que pasa al reconectar.
+
+    Sin esto, un server2 reiniciado a mitad de una subida no tiene forma de
+    saberlo, y la UI enseña "grabando" con el cronometro corriendo para algo que
+    en realidad ya paró y se esta subiendo. Solo se avisa cuando algo cambia,
+    no en cada latido.
+    """
+    if dev.recording_now == recording and dev.uploading == uploading:
+        return
+    dev.recording_now = recording
+    dev.uploading = uploading
+    await hub.notify(dev.uuid, device_status(dev))
+
+
 async def reconcile_hello(dev: hub.Device, reported_uuid: str | None):
     """El ESP32 manda sobre si hay grabacion en curso. Si el ACK del start se
     perdio, server2 nunca creo la fila: la grabacion estaria viva en la SD pero
@@ -92,60 +116,20 @@ async def reconcile_hello(dev: hub.Device, reported_uuid: str | None):
     log.info("Recording %s reconciliada desde hello en device %s", reported_uuid, dev.uuid)
 
 
-# --- subida: un fichero a la vez, reanudable por offset ---------------------
+# --- subida: un POST con el fichero entero ----------------------------------
 
-def _partial_path(device_uuid: str, rec_uuid: str) -> Path:
-    directory = config.UPLOAD_DIR / device_uuid
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{rec_uuid}.bin"
+async def complete_upload(device_uuid: str, rec_uuid: str, data: bytes):
+    """Persiste el .bin que acaba de subir la ESP32 por POST.
 
+    No hay reanudacion ni checksum a proposito: el fichero cabe de sobra en una
+    peticion (12 h a 25 Hz ≈ 6,5 MB) y la ESP32 no borra su copia de la SD hasta
+    ver un 200. Si esto falla, se responde !=200 y la ESP32 reintenta entera mas
+    tarde; no se pierde nada.
+    """
+    await asyncio.to_thread(db.complete_recording, rec_uuid, device_uuid, data)
 
-async def upload_start(dev: hub.Device, message: dict):
-    rec_uuid, size = message.get("uuid"), message.get("size")
-    if not isinstance(rec_uuid, str) or not isinstance(size, int):
-        return
-    path = _partial_path(dev.uuid, rec_uuid)
-    dev.upload = (rec_uuid, path)
-    offset = path.stat().st_size if path.exists() else 0
-    log.info("Upload %s: arranca en offset %d/%d", rec_uuid, offset, size)
-    await dev.send({"type": "upload_offset", "uuid": rec_uuid, "offset": offset})
-
-
-async def upload_chunk(dev: hub.Device, data: bytes):
-    if dev.upload is None:
-        return
-    with dev.upload[1].open("ab") as f:
-        f.write(data)
-
-
-async def upload_done(dev: hub.Device, message: dict):
-    if dev.upload is None or message.get("uuid") != dev.upload[0]:
-        return
-    rec_uuid, path = dev.upload
-
-    raw = path.read_bytes()
-    checksum = f"{zlib.crc32(raw) & 0xFFFFFFFF:08x}"
-    if len(raw) != message.get("size") or checksum != message.get("checksum"):
-        log.warning(
-            "Upload %s: no coincide (size %d vs %s, checksum %s vs %s) — se pide reintento",
-            rec_uuid, len(raw), message.get("size"), checksum, message.get("checksum"),
-        )
-        await dev.send({"type": "upload_error", "uuid": rec_uuid, "reason": "checksum_mismatch"})
-        return
-
-    try:
-        await asyncio.to_thread(db.complete_recording, rec_uuid, dev.uuid, raw)
-    except Exception as exc:
-        # el fichero se queda en disco (aqui y en la SD): no se pierde nada,
-        # solo no se le dice al ESP32 que puede borrarlo todavia.
-        log.exception("No se pudo persistir %s en Supabase", rec_uuid)
-        await dev.send({"type": "upload_error", "uuid": rec_uuid, "reason": f"supabase: {exc}"[:120]})
-        return
-
-    await dev.send({"type": "upload_confirmed", "uuid": rec_uuid})
-    path.unlink(missing_ok=True)
-    dev.upload = None
-    if dev.recording_uuid == rec_uuid:
+    dev = hub.devices.get(device_uuid)
+    if dev is not None and dev.recording_uuid == rec_uuid:
         dev.recording_uuid = None
-    await hub.notify(dev.uuid, {"type": "recording_finished", "uuid": rec_uuid})
-    log.info("Upload %s: confirmado y persistido en Supabase", rec_uuid)
+    await hub.notify(device_uuid, {"type": "recording_finished", "uuid": rec_uuid})
+    log.info("Upload %s: %d B persistidos en Supabase", rec_uuid, len(data))

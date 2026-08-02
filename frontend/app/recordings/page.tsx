@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "r
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
   isDeviceOnline,
+  isDeviceStatus,
   isRecordingFinished,
   isRecordingStarted,
   isRecordingStopping,
@@ -33,6 +34,9 @@ export default function RecordingsPage() {
 
   const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
   const [uploading, setUploading] = useState(false);
+  // Subida en curso ahora mismo, frente a "parada pero todavía sin subir"
+  // (sin red, o esperando el reintento). Ambas se ven como "Subiendo".
+  const [transferring, setTransferring] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -87,6 +91,14 @@ export default function RecordingsPage() {
         setDeviceOnline(data.type === "device_online");
         return;
       }
+      if (isDeviceStatus(data)) {
+        // Si hay una grabación viva y el aparato dice que ya no graba, lo que
+        // queda es la subida — aunque nos hayamos perdido el recording_stopping
+        // (server2 reiniciado, o esta pestaña abierta a mitad de la subida).
+        setUploading(!data.recording);
+        setTransferring(data.uploading);
+        return;
+      }
       if (isRecordingStarted(data)) {
         mergeRecording(data.recording);
         return;
@@ -109,6 +121,7 @@ export default function RecordingsPage() {
   useEffect(() => {
     if (active == null) {
       setUploading(false);
+      setTransferring(false);
       return;
     }
     const startedAt = Date.parse(active.started_at);
@@ -162,6 +175,7 @@ export default function RecordingsPage() {
               active={active}
               elapsedSeconds={elapsedSeconds}
               uploading={uploading}
+              transferring={transferring}
               deviceOnline={deviceOnline}
               wsStatus={wsStatus}
               pending={pending}
@@ -334,6 +348,7 @@ function RecordingNowPanel({
   active,
   elapsedSeconds,
   uploading,
+  transferring,
   deviceOnline,
   wsStatus,
   pending,
@@ -343,6 +358,7 @@ function RecordingNowPanel({
   active: Recording;
   elapsedSeconds: number;
   uploading: boolean;
+  transferring: boolean;
   deviceOnline: boolean | null;
   wsStatus: WsStatus;
   pending: boolean;
@@ -364,7 +380,9 @@ function RecordingNowPanel({
             : deviceOnline !== true
               ? "ESP32 desconectada"
               : uploading
-                ? "Subiendo el fichero…"
+                ? transferring
+                  ? "Subiendo el fichero…"
+                  : "Parada · pendiente de subir…"
                 : "ESP32 Conectada · Grabando…"}
         </span>
       </div>

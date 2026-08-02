@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import time
-from pathlib import Path
 
 from fastapi import WebSocket
 
@@ -20,7 +19,11 @@ class Device:
         self.last_seen = time.monotonic()
         self.broadcasting = False  # lo ultimo que dijo su heartbeat
         self.recording_uuid: str | None = None
-        self.upload: tuple[str, Path] | None = None  # (uuid de grabacion, fichero parcial)
+        # Lo ultimo que dijo el heartbeat sobre que esta haciendo el aparato.
+        # None = todavia no ha llegado ninguno: asi el primero siempre cuenta
+        # como cambio y los browsers reciben un estado de partida de fiar.
+        self.recording_now: bool | None = None
+        self.uploading: bool | None = None
         self.ack: asyncio.Future | None = None  # start en vuelo, lo resuelve el recording_ack
         self.ack_uuid: str | None = None
         self.mismatch_since: float | None = None  # desde cuando difieren deseado y reportado

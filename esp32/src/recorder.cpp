@@ -223,21 +223,8 @@ std::vector<PendingUpload> Recorder::listPending() {
   return out;
 }
 
-uint32_t Recorder::sizeOf(const String& uuid) {
-  File f = SD.open(binPath(uuid), FILE_READ);
-  if (!f) return 0;
-  uint32_t size = f.size();
-  f.close();
-  return size;
-}
-
-size_t Recorder::readChunk(const String& uuid, uint32_t offset, uint8_t* buf, size_t maxLen) {
-  File f = SD.open(binPath(uuid), FILE_READ);
-  if (!f) return 0;
-  f.seek(offset);
-  size_t n = f.readBytes((char*)buf, maxLen);
-  f.close();
-  return n;
+File Recorder::openBin(const String& uuid) {
+  return SD.open(binPath(uuid), FILE_READ);
 }
 
 void Recorder::confirmUploaded(const String& uuid) {

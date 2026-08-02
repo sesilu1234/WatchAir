@@ -3,7 +3,13 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LiveWaveform from "../../components/LiveWaveform";
 import { MONO } from "../../theme";
-import { isRecordingFinished, isRecordingStopping, stopRecording, type Recording } from "../../lib/api";
+import {
+  isDeviceStatus,
+  isRecordingFinished,
+  isRecordingStopping,
+  stopRecording,
+  type Recording,
+} from "../../lib/api";
 import { useFrontendSocket } from "../../lib/useFrontendSocket";
 import { formatClock, formatTime, recordingName } from "../../lib/format";
 import { useCompact } from "../../lib/useCompact";
@@ -24,6 +30,12 @@ export default function LiveRecordingView({ recording }: { recording: Recording 
     (data: unknown) => {
       if (isRecordingStopping(data) && data.uuid === recording.uuid) {
         setUploading(true);
+        return;
+      }
+      if (isDeviceStatus(data) && data.uuid === recording.device_uuid) {
+        // Esta vista solo se monta con ended_at === null, así que "el aparato
+        // ya no graba" solo puede significar que queda la subida.
+        setUploading(!data.recording);
         return;
       }
       if (isRecordingFinished(data) && data.uuid === recording.uuid) {

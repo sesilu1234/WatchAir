@@ -4,7 +4,15 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import config, hub, recordings
@@ -91,6 +99,10 @@ async def browser_ws(websocket: WebSocket, token: str):
     await websocket.send_json(
         {"type": "device_online" if dev is not None else "device_offline", "uuid": uuid}
     )
+    if dev is not None:
+        # Estado de partida: quien entra a mitad de una subida tiene que verlo ya,
+        # sin esperar a que el heartbeat cambie de valor (solo avisa en cambios).
+        await websocket.send_json(recordings.device_status(dev))
 
     expired = False
     try:
@@ -120,11 +132,40 @@ async def browser_ws(websocket: WebSocket, token: str):
 
 
 # ===================================================
-# WS ESP32: hello / heartbeat / comandos / muestras / subida
+# ESP32: WS de control + POST de subida
 # ===================================================
+def _device_authorized(uuid: str, secret: str) -> bool:
+    return secret == config.DEVICE_SECRET and uuid in config.DEVICE_UUIDS
+
+
+@app.post("/device/upload")
+async def device_upload(uuid: str, secret: str, recording: str, request: Request):
+    """La ESP32 sube el .bin entero. Un 200 es su permiso para borrarlo de la SD,
+    asi que cualquier fallo aqui tiene que salir como error: reintentara sola."""
+    if not _device_authorized(uuid, secret):
+        raise HTTPException(status_code=403, detail="Credenciales de dispositivo inválidas")
+
+    # Se acumula con tope en vez de request.body(): un Content-Length mentido no
+    # puede hacer crecer esto sin limite.
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > config.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Grabación demasiado grande")
+    if not data:
+        raise HTTPException(status_code=400, detail="Cuerpo vacío")
+
+    try:
+        await recordings.complete_upload(uuid, recording, bytes(data))
+    except Exception as exc:
+        log.exception("Upload %s: no se pudo persistir", recording)
+        raise HTTPException(status_code=503, detail=f"{exc}"[:200]) from exc
+    return {"ok": True}
+
+
 @app.websocket("/device/ws")
 async def device_ws(websocket: WebSocket, uuid: str, secret: str):
-    if secret != config.DEVICE_SECRET or uuid not in config.DEVICE_UUIDS:
+    if not _device_authorized(uuid, secret):
         await websocket.close(code=4403)
         return
 
@@ -138,19 +179,9 @@ async def device_ws(websocket: WebSocket, uuid: str, secret: str):
 
     try:
         while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                break
+            # Solo texto: el binario de las grabaciones va por POST /device/upload.
+            text = await websocket.receive_text()
             dev.last_seen = time.monotonic()
-
-            raw_bytes = message.get("bytes")
-            if raw_bytes is not None:
-                await recordings.upload_chunk(dev, raw_bytes)
-                continue
-
-            text = message.get("text")
-            if text is None:
-                continue
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
@@ -171,20 +202,16 @@ async def _handle_device_message(dev: hub.Device, data: dict):
     if msg_type == "hello":
         reported = data.get("current_recording_uuid") if data.get("rec_en_curso") else None
         await recordings.reconcile_hello(dev, reported)
-        log.info(
-            "Device %s hello: rec_en_curso=%s pending=%d",
-            dev.uuid, data.get("rec_en_curso"), len(data.get("pending") or []),
-        )
+        log.info("Device %s hello: rec_en_curso=%s", dev.uuid, data.get("rec_en_curso"))
     elif msg_type == "heartbeat":
         dev.broadcasting = bool(data.get("broadcasting"))
+        await recordings.reconcile_heartbeat(
+            dev, bool(data.get("recording")), bool(data.get("uploading"))
+        )
     elif msg_type == "recording_ack":
         if dev.ack is not None and data.get("uuid") == dev.ack_uuid and not dev.ack.done():
             # rec=false => alguna precondición del ESP32 falló; el motivo sube al browser
             dev.ack.set_result((bool(data.get("rec", True)), data.get("reason") or ""))
-    elif msg_type == "upload_start":
-        await recordings.upload_start(dev, data)
-    elif msg_type == "upload_done":
-        await recordings.upload_done(dev, data)
     elif msg_type is None and "p" in data:
         # muestra en vivo {"t": ms, "p": presion, "temp": temperatura}, sin batching
         await hub.notify(dev.uuid, data)
