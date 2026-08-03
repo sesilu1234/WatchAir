@@ -19,6 +19,10 @@ extern volatile bool broadcasting;     // escribe: net (start/stop_broadcast)
 extern volatile bool sensorOk;         // escribe: sampler (última lectura I2C)
 extern volatile bool uploadInFlight;   // escribe: sd; lee: net, para NACKear el start
 
+// Vacía la cola de grabación (definida en main.cpp). Se llama al arrancar una
+// grabación, con recordingActive ya en false para que nadie esté encolando.
+void resetSampleQueue();
+
 // Mutex con herencia de prioridad, así que un start_recording de la tarea de
 // red no se queda esperando detrás de un flush de la de SD.
 class RecorderLock {

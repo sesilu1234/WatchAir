@@ -6,10 +6,12 @@
 export type Point = [number, number | null];
 
 const MAGIC = "WAIR";
-// v1: magic + version(1) + uuid(16) + hz(2)                  = 23 B
-// v2: magic + version(1) + uuid(16) + hz(1) + started_epoch(4) = 26 B
+// v1: magic + version(1) + uuid(16) + hz(2)                      = 23 B
+// v2: magic + version(1) + uuid(16) + hz(1) + started_epoch(4)   = 26 B
+// v3: magic + version(1) + uuid(16) + hz(1) + started_epoch_ms(8) = 30 B
 const HEADER_SIZE_V1 = 4 + 1 + 16 + 2;
 const HEADER_SIZE_V2 = 4 + 1 + 16 + 1 + 4;
+const HEADER_SIZE_V3 = 4 + 1 + 16 + 1 + 8;
 const RECORD_SIZE = 6; // uint32 t_ms + int16 p_centiPa
 export const LOOP_TIME_MS = 40; // 25 Hz — debe coincidir con el firmware y server2
 
@@ -20,9 +22,12 @@ export function decodeRecording(buffer: Buffer): Point[] {
   const magic = buffer.toString("ascii", 0, 4);
   if (magic !== MAGIC) throw new Error(`Cabecera de grabación inválida: "${magic}"`);
 
-  // Se siguen leyendo las grabaciones v1 que ya estén en Storage.
+  // Se siguen leyendo las grabaciones v1 y v2 que ya estén en Storage. Aquí la
+  // versión solo decide cuánto hay que saltar: el inicio no se usa para pintar,
+  // que los puntos van en segundos relativos al primer registro.
   const version = buffer.readUInt8(4);
-  const HEADER_SIZE = version >= 2 ? HEADER_SIZE_V2 : HEADER_SIZE_V1;
+  const HEADER_SIZE =
+    version >= 3 ? HEADER_SIZE_V3 : version === 2 ? HEADER_SIZE_V2 : HEADER_SIZE_V1;
   if (buffer.length < HEADER_SIZE) return [];
 
   const points: Point[] = [];

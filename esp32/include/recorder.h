@@ -4,15 +4,19 @@
 #include <vector>
 
 // Formato binario en SD, un fichero por grabación: /rec/<uuid>.bin
-//   cabecera (26 B): magic "WAIR"(4) + version(1) + uuid crudo(16) + hz(1)
-//                    + started_epoch u32 LE (segundos)
+//   cabecera (30 B): magic "WAIR"(4) + version(1) + uuid crudo(16) + hz(1)
+//                    + started_epoch_ms u64 LE (ms desde 1970)
 //   registros (6 B): t_ms u32 LE + p_centiPa i16 LE, a 25 Hz
 //
-// t_ms = epoch_ms_actual − started_epoch*1000. Al salir del reloj real (no de
-// millis()), la t es monótona y sobrevive a los reinicios sin corregir nada a
-// posteriori: el hueco de un apagón queda como un salto real entre dos
-// registros consecutivos, y la gráfica lo pinta con la regla de gaps.
-// Debe coincidir con frontend/app/lib/binaryFormat.ts.
+// El inicio va en ms, no en segundos, para que el t=0 del fichero sea un
+// instante exacto: con segundos truncados habría hasta 999 ms de desfase entre
+// lo que dice la cabecera y el origen contra el que se sellan las muestras.
+//
+// t_ms = ms desde ese inicio, sellados en el instante en que el sensor devolvió
+// la muestra (no cuando se escribe: entre una cosa y otra hay cola, mutex y
+// flushes a SD, y ese retardo es variable). El hueco de un apagón queda como un
+// salto real entre dos registros consecutivos, y la gráfica lo pinta con la
+// regla de gaps. Debe coincidir con frontend/app/lib/binaryFormat.ts.
 //
 // /rec/active: contiene solo el uuid de la grabación en curso. Se escribe una
 // vez al start y se borra al stop; no se reescribe periódicamente. Todo lo
@@ -22,7 +26,7 @@ constexpr uint16_t SAMPLE_HZ = 25;
 constexpr uint32_t LOOP_TIME_MS = 1000 / SAMPLE_HZ;        // 40 ms
 constexpr uint32_t RECORDING_MAX_SECONDS = 12UL * 3600UL;  // corte duro a las 12 h
 
-constexpr size_t HEADER_SIZE = 4 + 1 + 16 + 1 + 4;  // 26
+constexpr size_t HEADER_SIZE = 4 + 1 + 16 + 1 + 8;  // 30
 constexpr size_t RECORD_SIZE = 6;
 constexpr size_t WRITE_BUFFER_RECORDS = 85;  // ~510 B, cerca del bloque de 512 B de la tarjeta
 
@@ -52,8 +56,9 @@ class Recorder {
   // "" si arrancó bien; si no, el motivo, para mandarlo en el ACK.
   const char* start(const String& uuid, bool sensorOk);
   void stop();
-  // En el loop de muestreo: sella con el reloj real y corta sola a las 12 h.
-  void sample(int16_t pCentiPa);
+  // `sampleMillis` es el millis() del instante en que se leyó el sensor, no el
+  // de ahora: lo trae la muestra desde la tarea de muestreo. Corta sola a las 12 h.
+  void sample(int16_t pCentiPa, uint32_t sampleMillis);
 
   // --- subida ---
   std::vector<PendingUpload> listPending();  // /rec/*.bin salvo la que se graba ahora
@@ -69,7 +74,18 @@ class Recorder {
   bool recording_ = false;
   String currentUuid_ = "";
   File binFile_;
-  uint32_t startedEpoch_ = 0;  // el de la cabecera; define toda la línea de tiempo
+  uint64_t startedEpochMs_ = 0;  // el de la cabecera; define toda la línea de tiempo
+  // El millis() de cuando esta tanda de grabación empezó a correr, y lo que ya
+  // llevaba grabado la grabación en ese momento (0 si es nueva; las horas que
+  // lleve viva si se está reanudando tras un reinicio).
+  //
+  //   t_ms de la muestra = (millis de la muestra − anchorMillis_) + deltaMs_
+  //
+  // Los dos se fijan una sola vez, al arrancar o al reanudar. A partir de ahí el
+  // sellado no vuelve a mirar el reloj de pared, así que los steps de SNTP (que
+  // los hay, ~1/h y a saltos) no entran en la t.
+  uint32_t anchorMillis_ = 0;
+  uint32_t deltaMs_ = 0;
 
   uint8_t writeBuf_[WRITE_BUFFER_RECORDS * RECORD_SIZE];
   size_t writeBufUsed_ = 0;

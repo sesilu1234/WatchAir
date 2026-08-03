@@ -15,6 +15,8 @@ bool timeIsSynced() {
   return time(nullptr) > 1700000000;  // fecha "razonable": NTP ya resolvió
 }
 
+// El reloj de pared con milisegundos. time(nullptr) da lo mismo truncado al
+// segundo, y ese truncado es justo lo que no queremos en el inicio.
 static uint64_t epochMillis() {
   struct timeval tv;
   gettimeofday(&tv, nullptr);
@@ -79,11 +81,11 @@ void Recorder::resumeIfPending() {
     return;
   }
 
-  uint32_t startedEpoch;
-  memcpy(&startedEpoch, header + 22, 4);
-  uint32_t now = (uint32_t)time(nullptr);
+  uint64_t startedEpochMs;
+  memcpy(&startedEpochMs, header + 22, 8);
+  uint64_t nowMs = epochMillis();
 
-  if (now < startedEpoch || now - startedEpoch >= RECORDING_MAX_SECONDS) {
+  if (nowMs < startedEpochMs || nowMs - startedEpochMs >= (uint64_t)RECORDING_MAX_SECONDS * 1000ULL) {
     // se pasó de las 12 h mientras estaba apagada: queda pendiente de subir
     SD.remove(ACTIVE_PATH);
     Serial.printf("Recorder: %s pasó de 12 h estando apagada, queda pendiente\n", uuid.c_str());
@@ -95,12 +97,17 @@ void Recorder::resumeIfPending() {
     SD.remove(ACTIVE_PATH);
     return;
   }
-  startedEpoch_ = startedEpoch;
+  startedEpochMs_ = startedEpochMs;
+  // Lo que la grabación ya llevaba antes de este arranque: el reloj de pared es
+  // lo único que lo sabe, porque millis() se fue a cero en el reinicio. A partir
+  // de aquí se sigue contando con millis() desde el ancla.
+  deltaMs_ = (uint32_t)(nowMs - startedEpochMs);
+  anchorMillis_ = millis();
   currentUuid_ = uuid;
   recording_ = true;
   writeBufUsed_ = 0;
   Serial.printf("Recorder: reanudando %s (%u s ya grabados)\n", uuid.c_str(),
-                (unsigned)(now - startedEpoch));
+                (unsigned)((nowMs - startedEpochMs) / 1000ULL));
 }
 
 const char* Recorder::start(const String& uuid, bool sensorOk) {
@@ -121,7 +128,10 @@ const char* Recorder::start(const String& uuid, bool sensorOk) {
   // Espacio para 12 h. Lo que ocupan los pendientes ya cuenta como usado.
   if (SD.totalBytes() - SD.usedBytes() < REQUIRED_FREE_BYTES) return "sin espacio para 12 h";
 
-  uint32_t startedEpoch = (uint32_t)time(nullptr);
+  // Los dos relojes leídos a la vez: este instante es el t=0 de la grabación,
+  // dicho en tiempo real (va a la cabecera) y en millis() (el ancla del sellado).
+  uint64_t startedEpochMs = epochMillis();
+  uint32_t anchorMillis = millis();
 
   SD.remove(binPath(uuid));  // start con uuid nuevo: siempre de cero
   File f = SD.open(binPath(uuid), FILE_WRITE);
@@ -129,17 +139,19 @@ const char* Recorder::start(const String& uuid, bool sensorOk) {
 
   uint8_t header[HEADER_SIZE];
   memcpy(header, "WAIR", 4);
-  header[4] = 2;  // versión 2: cabecera con started_epoch
+  header[4] = 3;  // versión 3: started_epoch en ms (la 2 lo tenía en segundos)
   uint8_t uuidBytes[16];
   parseUuidBytes(uuid, uuidBytes);
   memcpy(header + 5, uuidBytes, 16);
   header[21] = (uint8_t)SAMPLE_HZ;
-  memcpy(header + 22, &startedEpoch, 4);
+  memcpy(header + 22, &startedEpochMs, 8);
   f.write(header, HEADER_SIZE);
   f.flush();
 
   binFile_ = f;
-  startedEpoch_ = startedEpoch;
+  startedEpochMs_ = startedEpochMs;
+  anchorMillis_ = anchorMillis;
+  deltaMs_ = 0;  // grabación nueva: no lleva nada grabado de antes
   currentUuid_ = uuid;
   recording_ = true;
   writeBufUsed_ = 0;
@@ -161,23 +173,26 @@ void Recorder::stop() {
   SD.remove(ACTIVE_PATH);
   recording_ = false;
   currentUuid_ = "";
-  startedEpoch_ = 0;
+  startedEpochMs_ = 0;
+  anchorMillis_ = 0;
+  deltaMs_ = 0;
 }
 
-void Recorder::sample(int16_t pCentiPa) {
+void Recorder::sample(int16_t pCentiPa, uint32_t sampleMillis) {
   if (!recording_) return;
 
-  uint64_t startMs = (uint64_t)startedEpoch_ * 1000ULL;
-  uint64_t nowMs = epochMillis();
-  if (nowMs < startMs) return;  // reloj hacia atrás: se descarta la muestra
+  // Resta con signo para que el wrap de millis() (49,7 días) se resuelva solo.
+  // Negativo = la muestra se leyó antes de que esta grabación empezara: es un
+  // resto de la anterior que se coló en la cola entre el reset y el arranque.
+  int32_t sinceAnchor = (int32_t)(sampleMillis - anchorMillis_);
+  if (sinceAnchor < 0) return;
 
-  uint64_t elapsed = nowMs - startMs;
-  if (elapsed >= (uint64_t)RECORDING_MAX_SECONDS * 1000ULL) {
+  uint32_t tMs = (uint32_t)sinceAnchor + deltaMs_;
+  if (tMs >= RECORDING_MAX_SECONDS * 1000UL) {
     Serial.println("Recorder: tope de 12 h alcanzado, cierro sola");
     stop();
     return;
   }
-  uint32_t tMs = (uint32_t)elapsed;
 
   size_t o = writeBufUsed_;
   writeBuf_[o + 0] = tMs & 0xFF;
@@ -193,8 +208,7 @@ void Recorder::sample(int16_t pCentiPa) {
 
 uint32_t Recorder::elapsedSeconds() const {
   if (!recording_) return 0;
-  uint32_t now = (uint32_t)time(nullptr);
-  return now > startedEpoch_ ? now - startedEpoch_ : 0;
+  return (millis() - anchorMillis_ + deltaMs_) / 1000UL;  // igual que las muestras
 }
 
 // --- subida ---

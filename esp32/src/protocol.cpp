@@ -87,8 +87,8 @@ void handleServerText(WebSocketsClient& ws, uint8_t* payload, size_t len) {
     // bloquear y no queremos a la tarea de SD esperando por eso.
     const char* err;
     {
-      RecorderLock lock;
-      if (uploadInFlight) {
+      RecorderLock lock;  
+      if (uploadInFlight) {  // or (!recorder.listPending().empty()) return "hay una grabacion sin subir";
         // Grabar y subir se pelearían por la SD. Es un NACK normal: server2 lo
         // convierte en un 409 con el motivo y el browser puede reintentar.
         err = "subiendo una grabacion, reintenta en unos segundos";
@@ -98,7 +98,12 @@ void handleServerText(WebSocketsClient& ws, uint8_t* payload, size_t len) {
         // start con un uuid distinto al que graba: se cierra y descarta la
         // vieja y se arranca de cero con la nueva, tal como espera server2.
         if (recorder.isRecording()) recorder.stop();
+        // Antes de encolar nada nuevo: se corta el grifo del sampler, se arranca
+        // y se tira lo que quedara de la grabación anterior. El orden importa,
+        // si no la nueva empezaría con muestras selladas contra el t=0 viejo.
+        recordingActive = false;
         err = recorder.start(uuid, sensorOk);
+        resetSampleQueue();
         recordingActive = recorder.isRecording();
       }
     }

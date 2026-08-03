@@ -44,7 +44,7 @@ constexpr uint32_t SD_SPI_HZ = 20000000;
 
 // Una muestra ya lista para escribir o emitir.
 struct Sample {
-  uint32_t tMs;    // millis(), solo para el live view
+  uint32_t tMs;    // millis() del instante de la lectura: sella la grabación y el live view
   float pressure;
   float temp;
   int16_t pCentiPa;
@@ -64,6 +64,12 @@ volatile bool uploadInFlight = false;
 
 static QueueHandle_t sampleQueue = nullptr;
 static QueueHandle_t liveQueue = nullptr;
+
+// Lo que quede en la cola al arrancar una grabación son muestras de la anterior,
+// con un sello que no pertenece a la nueva línea de tiempo. Se tiran.
+void resetSampleQueue() {
+  if (sampleQueue) xQueueReset(sampleQueue);
+}
 
 WebSocketsClient ws;
 SensirionI2CSdp sdp;
@@ -148,7 +154,9 @@ static void sdTask(void*) {
     // no se está grabando) hay que despertarse igual para mirar si toca subir.
     if (xQueueReceive(sampleQueue, &s, pdMS_TO_TICKS(100)) == pdTRUE) {
       RecorderLock lock;
-      recorder.sample(s.pCentiPa);
+      // s.tMs (millis() de la lectura) y no "ahora": la muestra puede llevar
+      // rato en la cola si un flush o una subida entretuvieron a esta tarea.
+      recorder.sample(s.pCentiPa, s.tMs);
       // recorder.sample() corta sola a las 12 h: hay que enterarse de eso.
       recordingActive = recorder.isRecording();
       continue;  // vaciar la cola antes de plantearse subir nada
