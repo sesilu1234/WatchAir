@@ -1,19 +1,17 @@
 "use client";
 import Link from "next/link";
-import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
   isDeviceOnline,
   isDeviceStatus,
   isRecordingFinished,
-  isRecordingStarted,
-  isRecordingStopping,
   listDevices,
   listRecordings,
   startRecording,
   stopRecording,
   type Device,
+  type DeviceStatusMessage,
   type Recording,
 } from "../lib/api";
 import { useCompact } from "../lib/useCompact";
@@ -21,22 +19,23 @@ import { useFrontendSocket, type WsStatus } from "../lib/useFrontendSocket";
 import {
   durationSeconds,
   formatClock,
-  formatNumber,
   formatRelativeDate,
   formatTime,
   recordingName,
 } from "../lib/format";
 
+// Nada de deducir estados: lo que hace el aparato sale entero del `status` que
+// manda la ESP32 (cada 2 s y en cuanto algo cambia). Sin conexión con ella no se
+// sabe nada de nada, y eso es exactamente lo que se enseña.
+//
+// La lista de abajo son solo grabaciones YA subidas: la fila no existe hasta que
+// el fichero llega al server, así que la que está en curso vive únicamente en el
+// status y nunca aparece en el historial.
 export default function RecordingsPage() {
   const compact = useCompact();
-  const { data: session } = useSession();
-  const myDeviceUuid = session?.user?.deviceUuid ?? null;
 
   const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
-  const [uploading, setUploading] = useState(false);
-  // Subida en curso ahora mismo, frente a "parada pero todavía sin subir"
-  // (sin red, o esperando el reintento). Ambas se ven como "Subiendo".
-  const [transferring, setTransferring] = useState(false);
+  const [status, setStatus] = useState<DeviceStatusMessage | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,108 +44,67 @@ export default function RecordingsPage() {
   const [filterDeviceUuid, setFilterDeviceUuid] = useState("");
   const [filterDate, setFilterDate] = useState("");
 
-  // Añade/actualiza una grabación en el estado local sin esperar a Supabase:
-  // al arrancar, server2 confirma "grabando" antes de que la fila termine de
-  // persistirse (ver notify_recording_started, fire-and-forget con reintentos),
-  // así que si esperásemos solo al refetch la UI se quedaría pegada en "idle".
-  const mergeRecording = useCallback((rec: Recording) => {
-    setRecordings((prev) =>
-      prev.some((r) => r.uuid === rec.uuid) ? prev : [rec, ...prev],
-    );
-  }, []);
-
   const refresh = useCallback(() => {
     listRecordings()
-      .then((fetched) => {
-        setRecordings((prev) => {
-          // Conserva la grabación activa que ya conocemos (por la respuesta
-          // del start o por el WS) si Supabase todavía no la refleja.
-          const stillMissing = prev.filter(
-            (r) =>
-              r.device_uuid === myDeviceUuid &&
-              r.ended_at === null &&
-              !fetched.some((f) => f.uuid === r.uuid),
-          );
-          return [...stillMissing, ...fetched];
-        });
-      })
+      .then(setRecordings)
       .catch((err) => console.error(err));
     listDevices()
       .then(setDevices)
       .catch((err) => console.error(err));
-  }, [myDeviceUuid]);
+  }, []);
 
   useEffect(refresh, [refresh]);
-
-  // La grabación activa de ESTA cuenta (grabando o subiendo): el WS solo
-  // suscribe al propio device, así que solo se puede arrancar/parar el tuyo.
-  const active = useMemo(
-    () => recordings.find((r) => r.device_uuid === myDeviceUuid && r.ended_at === null) ?? null,
-    [recordings, myDeviceUuid],
-  );
 
   const handleMessage = useCallback(
     (data: unknown) => {
       if (isDeviceOnline(data)) {
-        setDeviceOnline(data.type === "device_online");
+        const online = data.type === "device_online";
+        setDeviceOnline(online);
+        // Desconectada: se descarta el último status en vez de dejarlo pintado.
+        // Lo que dijera hace un rato ya no dice nada de lo que pasa ahora.
+        if (!online) setStatus(null);
         return;
       }
       if (isDeviceStatus(data)) {
-        // Si hay una grabación viva y el aparato dice que ya no graba, lo que
-        // queda es la subida — aunque nos hayamos perdido el recording_stopping
-        // (server2 reiniciado, o esta pestaña abierta a mitad de la subida).
-        setUploading(!data.recording);
-        setTransferring(data.uploading);
-        return;
-      }
-      if (isRecordingStarted(data)) {
-        mergeRecording(data.recording);
+        setStatus(data);
         return;
       }
       if (isRecordingFinished(data)) {
+        // Ya hay fila: es el único momento en que el historial cambia.
         refresh();
-        return;
-      }
-      if (isRecordingStopping(data)) {
-        setUploading(true);
       }
     },
-    [refresh, mergeRecording],
+    [refresh],
   );
 
   const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: refresh });
 
-  // Cronómetro de la grabación en curso. 250 ms para que al entrar el valor
-  // real aparezca sin salto visible (React descarta el render si no cambia).
-  useEffect(() => {
-    if (active == null) {
-      setUploading(false);
-      setTransferring(false);
-      return;
-    }
-    const startedAt = Date.parse(active.started_at);
-    const id = setInterval(
-      () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000))),
-      250,
-    );
-    return () => clearInterval(id);
-  }, [active]);
+  const startedEpochMs = status?.rec_started_epoch_ms ?? null;
+  const recording = status?.rec_uuid != null;
+  const uploading = status?.uploading ?? false;
 
-  const run = async (action: () => Promise<unknown>, afterUpload = false) => {
+  // Cronómetro de la grabación en curso, contra el t=0 que dice la ESP32 (el de
+  // la cabecera del fichero). 250 ms para que al entrar el valor real aparezca
+  // sin salto visible (React descarta el render si no cambia).
+  useEffect(() => {
+    if (startedEpochMs == null) return;
+    const tick = () =>
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedEpochMs) / 1000)));
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [startedEpochMs]);
+
+  // No hace falta refrescar nada después: el siguiente status ya trae el estado
+  // bueno, y las dos llamadas devuelven uno para no esperar ni a eso.
+  const run = async (action: () => Promise<DeviceStatusMessage>) => {
     if (pending) return;
     setPending(true);
     setError(null);
     try {
-      await action();
-      if (afterUpload) setUploading(true);
-      refresh();
+      setStatus(await action());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      // Un fallo de start/stop suele significar que el frontend iba con estado
-      // atrasado respecto a server2 (p.ej. 409 "ya hay una grabación en
-      // curso"); re-sincroniza para que el panel salte al que corresponde en
-      // vez de dejar visible el botón equivocado.
-      refresh();
     } finally {
       setPending(false);
     }
@@ -155,10 +113,9 @@ export default function RecordingsPage() {
   const history = useMemo(
     () =>
       recordings
-        .filter((r) => r.uuid !== active?.uuid)
         .filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid)
         .filter((r) => !filterDate || r.started_at.slice(0, 10) === filterDate),
-    [recordings, active, filterDeviceUuid, filterDate],
+    [recordings, filterDeviceUuid, filterDate],
   );
 
   return (
@@ -170,25 +127,25 @@ export default function RecordingsPage() {
 
       <div style={{ ...styles.split, ...(compact ? mobile.split : null) }}>
         <div style={{ ...styles.topPane, ...(compact ? mobile.topPane : null) }}>
-          {active != null ? (
+          {recording && startedEpochMs != null ? (
             <RecordingNowPanel
-              active={active}
+              startedEpochMs={startedEpochMs}
               elapsedSeconds={elapsedSeconds}
-              uploading={uploading}
-              transferring={transferring}
               deviceOnline={deviceOnline}
               wsStatus={wsStatus}
               pending={pending}
               error={error}
-              onStop={() => run(stopRecording, true)}
+              onStop={() => run(stopRecording)}
             />
           ) : (
             <NewRecordingPanel
               deviceOnline={deviceOnline}
               wsStatus={wsStatus}
               pending={pending}
+              uploading={uploading}
+              pendingUploads={status?.pending ?? 0}
               error={error}
-              onStart={() => run(async () => mergeRecording(await startRecording()))}
+              onStart={() => run(startRecording)}
             />
           )}
         </div>
@@ -292,18 +249,24 @@ function NewRecordingPanel({
   deviceOnline,
   wsStatus,
   pending,
+  uploading,
+  pendingUploads,
   error,
   onStart,
 }: {
   deviceOnline: boolean | null;
   wsStatus: WsStatus;
   pending: boolean;
+  uploading: boolean;
+  pendingUploads: number;
   error: string | null;
   onStart: () => void;
 }) {
   const compact = useCompact();
   const [hovered, setHovered] = useState(false);
-  const disabled = wsStatus !== "connected" || deviceOnline !== true || pending;
+  // Mientras sube, la SD está ocupada y la ESP32 rechazaría el start: mejor no
+  // ofrecerlo. Que queden ficheros pendientes no estorba, esos se suben solos.
+  const disabled = wsStatus !== "connected" || deviceOnline !== true || pending || uploading;
   const hover = hovered && !disabled;
 
   return (
@@ -335,30 +298,34 @@ function NewRecordingPanel({
             ? "Esperando conexión con el servidor…"
             : deviceOnline !== true
               ? "Tu ESP32 no está conectada."
-              : "Pulsa para empezar a registrar la señal respiratoria."}
+              : uploading
+                ? "Subiendo la última grabación…"
+                : pendingUploads > 0
+                  ? `${pendingUploads} grabación(es) esperando a subirse.`
+                  : "Pulsa para empezar a registrar la señal respiratoria."}
         </p>
       )}
     </div>
   );
 }
 
-// --- Panel superior: grabando / subiendo ---
+// --- Panel superior: grabando ---
+//
+// Solo se ve mientras el status diga que hay grabación. En cuanto para, la SD
+// pasa a subir y el panel vuelve a ser el de "nueva grabación": no hay fila que
+// enseñar hasta que el fichero llegue al server.
 
 function RecordingNowPanel({
-  active,
+  startedEpochMs,
   elapsedSeconds,
-  uploading,
-  transferring,
   deviceOnline,
   wsStatus,
   pending,
   error,
   onStop,
 }: {
-  active: Recording;
+  startedEpochMs: number;
   elapsedSeconds: number;
-  uploading: boolean;
-  transferring: boolean;
   deviceOnline: boolean | null;
   wsStatus: WsStatus;
   pending: boolean;
@@ -372,18 +339,14 @@ function RecordingNowPanel({
       <div style={styles.liveHeaderRow}>
         <div style={styles.liveTitleGroup}>
           <span style={styles.recDot} />
-          <span style={styles.liveTitle}>{uploading ? "Subiendo" : "Recording Now"}</span>
+          <span style={styles.liveTitle}>Recording Now</span>
         </div>
         <span style={styles.liveConnText}>
           {wsStatus !== "connected"
             ? "Reconectando…"
             : deviceOnline !== true
               ? "ESP32 desconectada"
-              : uploading
-                ? transferring
-                  ? "Subiendo el fichero…"
-                  : "Parada · pendiente de subir…"
-                : "ESP32 Conectada · Grabando…"}
+              : "ESP32 Conectada · Grabando…"}
         </span>
       </div>
 
@@ -391,7 +354,7 @@ function RecordingNowPanel({
         <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
           <div style={styles.metricLabel}>Started</div>
           <div style={{ ...styles.metricValueLg, ...(compact ? mobile.metricValueLg : null) }}>
-            {formatTime(new Date(active.started_at))}
+            {formatTime(new Date(startedEpochMs))}
           </div>
         </div>
         <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
@@ -403,14 +366,14 @@ function RecordingNowPanel({
         <div style={{ ...styles.liveMetric, ...(compact ? mobile.liveMetric : null) }}>
           <div style={styles.metricLabel}>Nombre</div>
           <div style={{ ...styles.metricValueSm, ...(compact ? mobile.metricValueSm : null) }}>
-            {recordingName(active.started_at)}
+            {recordingName(startedEpochMs)}
           </div>
         </div>
       </div>
 
       <div style={styles.liveActions}>
         <Link
-          href={`/recordings/${active.uuid}`}
+          href="/realtime"
           style={{
             ...styles.actionBtn,
             ...styles.actionBtnGhost,
@@ -421,15 +384,15 @@ function RecordingNowPanel({
         </Link>
         <button
           onClick={onStop}
-          disabled={pending || uploading}
+          disabled={pending}
           style={{
             ...styles.actionBtn,
             ...styles.actionBtnStop,
             ...(compact ? mobile.actionBtn : null),
-            opacity: pending || uploading ? 0.6 : 1,
+            opacity: pending ? 0.6 : 1,
           }}
         >
-          {uploading ? "Subiendo…" : "Stop"}
+          {pending ? "Parando…" : "Stop"}
         </button>
         {error != null && <span style={styles.errorInline}>{error}</span>}
       </div>
@@ -443,7 +406,12 @@ function RecordingRow({ recording }: { recording: Recording }) {
   const compact = useCompact();
   const [hover, setHover] = useState(false);
   const date = new Date(recording.started_at);
-  const seconds = durationSeconds(recording.started_at, recording.ended_at);
+  // Sin uploaded_at la fila existe pero su binario no llegó a Storage: la ESP32
+  // lo sigue reintentando, así que se marca en vez de enseñar una duración que
+  // todavía no se puede abrir.
+  const seconds = recording.uploaded_at === null
+    ? null
+    : durationSeconds(recording.started_at, recording.ended_at);
 
   return (
     <Link
@@ -465,7 +433,7 @@ function RecordingRow({ recording }: { recording: Recording }) {
           {recording.username} · {formatRelativeDate(date)} · {formatTime(date)}
         </span>
       </div>
-      <span style={styles.rowDuration}>{seconds == null ? "Subiendo" : formatClock(seconds)}</span>
+      <span style={styles.rowDuration}>{seconds == null ? "Sin subir" : formatClock(seconds)}</span>
       <ChevronIcon />
     </Link>
   );

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import secrets as secrets_lib
 import time
 from contextlib import asynccontextmanager
 
@@ -33,7 +34,8 @@ async def _reconcile_loop():
     while True:
         await asyncio.sleep(1)
         try:
-            await hub.reconcile_tick()
+            await hub.expire_offline()
+            await hub.reconcile_broadcast()
         except Exception:
             log.exception("Fallo en el bucle de reconciliación")
 
@@ -45,14 +47,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-
-@app.get("/status")
-def status():
-    return {
-        "devices_online": list(hub.devices),
-        "subscribers": {uuid: len(subs) for uuid, subs in hub.subscribers.items()},
-    }
 
 
 # ===================================================
@@ -67,6 +61,8 @@ async def browser_claims(authorization: str | None = Header(default=None)) -> Br
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
+# Las dos devuelven el mismo `device_status` que viaja por el WS: el frontend se
+# pinta siempre desde el status, venga por donde venga.
 @app.post("/recordings/start")
 async def recordings_start(claims: BrowserClaims = Depends(browser_claims)):
     return await recordings.start(claims)
@@ -100,8 +96,8 @@ async def browser_ws(websocket: WebSocket, token: str):
         {"type": "device_online" if dev is not None else "device_offline", "uuid": uuid}
     )
     if dev is not None:
-        # Estado de partida: quien entra a mitad de una subida tiene que verlo ya,
-        # sin esperar a que el heartbeat cambie de valor (solo avisa en cambios).
+        # Estado de partida: quien entra a mitad de una grabación o de una subida
+        # tiene que verlo ya, sin esperar al siguiente status del aparato.
         await websocket.send_json(recordings.device_status(dev))
 
     expired = False
@@ -135,7 +131,10 @@ async def browser_ws(websocket: WebSocket, token: str):
 # ESP32: WS de control + POST de subida
 # ===================================================
 def _device_authorized(uuid: str, secret: str) -> bool:
-    return secret == config.DEVICE_SECRET and uuid in config.DEVICE_UUIDS
+    """Cada aparato con su secreto: un uuid que no esté en DEVICE_SECRETS no
+    existe, y el de uno no sirve para hacerse pasar por otro."""
+    expected = config.DEVICE_SECRETS.get(uuid)
+    return expected is not None and secrets_lib.compare_digest(expected, secret)
 
 
 @app.post("/device/upload")
@@ -157,6 +156,11 @@ async def device_upload(uuid: str, secret: str, recording: str, request: Request
 
     try:
         await recordings.complete_upload(uuid, recording, bytes(data))
+    except recordings.BadRecording as exc:
+        # Reintentar no lo va a arreglar, pero tampoco se borra nada: el fichero
+        # se queda en la SD por si se puede rescatar a mano.
+        log.error("Upload %s: fichero ilegible (%s)", recording, exc)
+        raise HTTPException(status_code=400, detail=f"{exc}"[:200]) from exc
     except Exception as exc:
         log.exception("Upload %s: no se pudo persistir", recording)
         raise HTTPException(status_code=503, detail=f"{exc}"[:200]) from exc
@@ -199,19 +203,11 @@ async def device_ws(websocket: WebSocket, uuid: str, secret: str):
 async def _handle_device_message(dev: hub.Device, data: dict):
     msg_type = data.get("type")
 
-    if msg_type == "hello":
-        reported = data.get("current_recording_uuid") if data.get("rec_en_curso") else None
-        await recordings.reconcile_hello(dev, reported)
-        log.info("Device %s hello: rec_en_curso=%s", dev.uuid, data.get("rec_en_curso"))
-    elif msg_type == "heartbeat":
-        dev.broadcasting = bool(data.get("broadcasting"))
-        await recordings.reconcile_heartbeat(
-            dev, bool(data.get("recording")), bool(data.get("uploading"))
-        )
-    elif msg_type == "recording_ack":
-        if dev.ack is not None and data.get("uuid") == dev.ack_uuid and not dev.ack.done():
-            # rec=false => alguna precondición del ESP32 falló; el motivo sube al browser
-            dev.ack.set_result((bool(data.get("rec", True)), data.get("reason") or ""))
+    if msg_type == "status":
+        await recordings.on_status(dev, data)
+    elif msg_type == "nack":
+        log.info("Device %s NACK: %s", dev.uuid, data.get("reason"))
+        recordings.on_nack(dev, data)
     elif msg_type is None and "p" in data:
         # muestra en vivo {"t": ms, "p": presion, "temp": temperatura}, sin batching
         await hub.notify(dev.uuid, data)

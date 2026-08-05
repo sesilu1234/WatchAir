@@ -21,19 +21,24 @@ bool uploadNextPending() {
   {
     RecorderLock lock;
     if (recordingActive) return false;  // mientras se graba, la SD es para grabar
+    if (recorder.pendingSnapshot() == 0) return false;  // contador en RAM: nada que recorrer
     std::vector<PendingUpload> pending = recorder.listPending();
     if (pending.empty()) return false;
     uuid = pending[0].uuid;
     uploadInFlight = true;
   }
+  statusDirty = true;  // la barrita de subida del frontend sale de aquí
 
   bool ok = false;
   File f = recorder.openBin(uuid);
   if (!f) {
     Serial.printf("Upload %s: no se pudo abrir el fichero\n", uuid.c_str());
-  } else if (f.size() == 0) {
-    Serial.printf("Upload %s: fichero vacio, se descarta\n", uuid.c_str());
-    ok = true;  // no hay nada que subir: que deje de estorbar en la cola
+  } else if (f.size() <= HEADER_SIZE) {
+    // Solo cabecera: una grabación parada antes de la primera muestra. Es la
+    // única excepción a "borrar solo con un 200", y no la contradice: no hay
+    // ningún dato que perder, y el server la rechazaría por vacía para siempre.
+    Serial.printf("Upload %s: sin ninguna muestra, se descarta\n", uuid.c_str());
+    ok = true;
   } else {
     size_t size = f.size();
     String path = String("/device/upload?uuid=") + DEVICE_UUID + "&secret=" + DEVICE_SECRET +
@@ -60,8 +65,11 @@ bool uploadNextPending() {
 
   {
     RecorderLock lock;
+    // Un 200 es el unico permiso para borrar: sin el, el fichero se queda en la
+    // SD y se reintenta entero mas tarde.
     if (ok) recorder.confirmUploaded(uuid);
     uploadInFlight = false;
   }
+  statusDirty = true;
   return ok;
 }

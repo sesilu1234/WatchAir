@@ -2,12 +2,18 @@
 
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 Recorder recorder;
 
 static const char* ACTIVE_PATH = "/rec/active";
 // Prueba de escritura fuera de /rec/ para no ensuciar el directorio de grabaciones.
 static const char* SCRATCH_PATH = "/wr_test.tmp";
+
+// La librería SD monta la tarjeta en el VFS bajo este punto (el defecto de
+// SD.begin()). Solo hace falta para truncate(), que es POSIX y no pasa por la
+// clase File.
+static const char* SD_MOUNT_POINT = "/sd";
 
 // --- utilidades ---
 
@@ -49,6 +55,9 @@ static void parseUuidBytes(const String& uuid, uint8_t out[16]) {
 void Recorder::begin() {
   sdReady_ = true;
   if (!SD.exists("/rec")) SD.mkdir("/rec");
+  // Único recorrido del directorio en toda la vida del programa: a partir de
+  // aquí el contador se mantiene a mano.
+  pendingCount_ = (uint16_t)listPending().size();
 }
 
 void Recorder::resumeIfPending() {
@@ -75,6 +84,7 @@ void Recorder::resumeIfPending() {
   }
   uint8_t header[HEADER_SIZE];
   f.read(header, HEADER_SIZE);
+  uint32_t size = f.size();
   f.close();
   if (memcmp(header, "WAIR", 4) != 0) {
     SD.remove(ACTIVE_PATH);
@@ -92,6 +102,23 @@ void Recorder::resumeIfPending() {
     return;
   }
 
+  // Apagarse a mitad de un flush deja un registro cortado al final. Si se
+  // reanudara sin más, lo que se escriba a continuación quedaría pegado a esa
+  // cola y desplazaría todos los registros nuevos.
+  uint32_t extra = (size - HEADER_SIZE) % RECORD_SIZE;
+  if (extra != 0) {
+    String vfs = String(SD_MOUNT_POINT) + path;
+    if (truncate(vfs.c_str(), size - extra) != 0) {
+      // Sin truncar no se puede seguir escribiendo en este fichero, pero lo que
+      // ya tiene dentro es válido: se deja como pendiente de subir. Se pierde
+      // la reanudación, no los datos (el server ignora la cola al parsear).
+      SD.remove(ACTIVE_PATH);
+      Serial.printf("Recorder: %s desalineado y no se pudo truncar, queda pendiente\n", uuid.c_str());
+      return;
+    }
+    Serial.printf("Recorder: %s desalineado, truncados %u B de cola\n", uuid.c_str(), (unsigned)extra);
+  }
+
   binFile_ = SD.open(path, FILE_APPEND);
   if (!binFile_) {
     SD.remove(ACTIVE_PATH);
@@ -106,6 +133,8 @@ void Recorder::resumeIfPending() {
   currentUuid_ = uuid;
   recording_ = true;
   writeBufUsed_ = 0;
+  if (pendingCount_ > 0) pendingCount_--;  // deja de estar pendiente: vuelve a ser la activa
+  publishSnapshot();
   Serial.printf("Recorder: reanudando %s (%u s ya grabados)\n", uuid.c_str(),
                 (unsigned)((nowMs - startedEpochMs) / 1000ULL));
 }
@@ -155,6 +184,7 @@ const char* Recorder::start(const String& uuid, bool sensorOk) {
   currentUuid_ = uuid;
   recording_ = true;
   writeBufUsed_ = 0;
+  publishSnapshot();
 
   SD.remove(ACTIVE_PATH);
   File marker = SD.open(ACTIVE_PATH, FILE_WRITE);
@@ -176,6 +206,8 @@ void Recorder::stop() {
   startedEpochMs_ = 0;
   anchorMillis_ = 0;
   deltaMs_ = 0;
+  pendingCount_++;  // el fichero que se acaba de cerrar entra en la cola de subida
+  publishSnapshot();
 }
 
 void Recorder::sample(int16_t pCentiPa, uint32_t sampleMillis) {
@@ -243,6 +275,7 @@ File Recorder::openBin(const String& uuid) {
 
 void Recorder::confirmUploaded(const String& uuid) {
   SD.remove(binPath(uuid));
+  if (pendingCount_ > 0) pendingCount_--;
 }
 
 // --- internos ---
@@ -252,4 +285,17 @@ void Recorder::flushWriteBuffer() {
   binFile_.write(writeBuf_, writeBufUsed_);
   binFile_.flush();
   writeBufUsed_ = 0;
+}
+
+// Ver el comentario de los getters en recorder.h: el orden de escritura es lo
+// que hace que un lector sin candado nunca vea un uuid con la fecha de otro.
+void Recorder::publishSnapshot() {
+  if (recording_) {
+    startedEpochMsSnapshot_ = startedEpochMs_;
+    strncpy(recUuidSnapshot_, currentUuid_.c_str(), sizeof(recUuidSnapshot_) - 1);
+    recUuidSnapshot_[sizeof(recUuidSnapshot_) - 1] = '\0';
+  } else {
+    recUuidSnapshot_[0] = '\0';
+    startedEpochMsSnapshot_ = 0;
+  }
 }

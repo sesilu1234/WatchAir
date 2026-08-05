@@ -212,6 +212,9 @@ export function chartOption(points: Points, view: ChartView, range: number): ECh
         type: "line",
         data: points,
         showSymbol: false,
+        // Explícito aunque sea el defecto: es lo que hace que un hueco se vea
+        // como un hueco en vez de como una recta larga entre dos muestras.
+        connectNulls: false,
         sampling: "lttb", // decenas de miles de puntos sin matar el navegador
         lineStyle: { color: INK, width: 2 },
         // el área se rellena contra 0: inspirar y espirar quedan a lados opuestos

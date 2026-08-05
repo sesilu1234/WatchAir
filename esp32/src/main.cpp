@@ -5,6 +5,7 @@
 #include <WebSocketsClient.h>
 #include <WiFi.h>
 #include <Wire.h>
+#include <esp_random.h>
 #include <time.h>
 
 #include "protocol.h"
@@ -21,7 +22,7 @@
 //   sd       prio 3, core 1 — única dueña de la tarjeta: vacía la cola de
 //                             muestras y, cuando no se graba, sube lo pendiente.
 //                             Puede bloquearse (flush, POST) sin molestar a nadie.
-//   net      prio 2, core 0 — ws.loop(), heartbeat, live view, watchdog de WiFi.
+//   net      prio 2, core 0 — ws.loop(), status, live view, watchdog de WiFi.
 //                             Única que toca `ws`.
 //
 // Antes esto era un solo loop() cooperativo: un flush de la SD (que puede tardar
@@ -31,7 +32,7 @@
 
 const unsigned long WIFI_CHECK_INTERVAL = 10000;
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
-const unsigned long HEARTBEAT_INTERVAL_MS = 2000;
+const unsigned long STATUS_INTERVAL_MS = 2000;
 const unsigned long UPLOAD_RETRY_MS = 5000;  // no reintentar en bucle una subida que falla
 
 // Módulo microSD por SPI (VSPI por defecto de un devkit ESP32: SCK=18,
@@ -61,6 +62,8 @@ volatile bool recordingActive = false;
 volatile bool broadcasting = false;
 volatile bool sensorOk = false;
 volatile bool uploadInFlight = false;
+volatile bool statusDirty = true;  // el primer status sale en cuanto haya WS
+char bootId[9] = "";
 
 static QueueHandle_t sampleQueue = nullptr;
 static QueueHandle_t liveQueue = nullptr;
@@ -142,10 +145,13 @@ static void sdTask(void*) {
     // que resumeIfPending() lo rellena. Subir antes se llevaría por delante el
     // .bin de una grabación viva.
     if (!resumeChecked && sdReady && timeIsSynced()) {
-      RecorderLock lock;
-      recorder.resumeIfPending();
-      recordingActive = recorder.isRecording();
+      {
+        RecorderLock lock;
+        recorder.resumeIfPending();
+        recordingActive = recorder.isRecording();
+      }
       resumeChecked = true;
+      statusDirty = true;  // ya se sabe si hay grabación viva y cuántas pendientes
       Serial.println("NTP sincronizado; reanudacion comprobada");
     }
 
@@ -153,12 +159,18 @@ static void sdTask(void*) {
     // Espera corta en vez de bloqueo indefinido: si no llegan muestras (porque
     // no se está grabando) hay que despertarse igual para mirar si toca subir.
     if (xQueueReceive(sampleQueue, &s, pdMS_TO_TICKS(100)) == pdTRUE) {
-      RecorderLock lock;
-      // s.tMs (millis() de la lectura) y no "ahora": la muestra puede llevar
-      // rato en la cola si un flush o una subida entretuvieron a esta tarea.
-      recorder.sample(s.pCentiPa, s.tMs);
-      // recorder.sample() corta sola a las 12 h: hay que enterarse de eso.
-      recordingActive = recorder.isRecording();
+      bool wasRecording = recordingActive;
+      {
+        RecorderLock lock;
+        // s.tMs (millis() de la lectura) y no "ahora": la muestra puede llevar
+        // rato en la cola si un flush o una subida entretuvieron a esta tarea.
+        recorder.sample(s.pCentiPa, s.tMs);
+        // recorder.sample() corta sola a las 12 h: hay que enterarse de eso.
+        recordingActive = recorder.isRecording();
+      }
+      // Al llegar al tope de 12 h el fichero ya está cerrado: se avisa a server2
+      // (recording = false) antes de que la tarea empiece con la subida.
+      if (wasRecording && !recordingActive) statusDirty = true;
       continue;  // vaciar la cola antes de plantearse subir nada
     }
 
@@ -170,18 +182,22 @@ static void sdTask(void*) {
 }
 
 // ===================================================
-// Tarea de red: ws, heartbeat, live view, WiFi
+// Tarea de red: ws, status, live view, WiFi
 // ===================================================
 static void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
   switch (type) {
     case WStype_CONNECTED:
       Serial.println("WS conectado a server2");
-      // hello reconstruye el estado de server2: qué grabación hay en curso
-      // (gana la ESP32).
-      sendHello(ws);
+      // El status reconstruye el estado de server2 (qué grabación hay en curso,
+      // qué queda por subir): gana la ESP32. No hay `hello`, es el mismo mensaje
+      // de siempre y sale ya, sin esperar al periódico.
+      statusDirty = true;
       break;
     case WStype_DISCONNECTED:
       Serial.println("WS desconectado de server2");
+      // Sin socket no hay a quién emitir: si no, el sampler sigue llenando
+      // liveQueue con muestras que solo se van a tirar.
+      broadcasting = false;
       break;
     case WStype_TEXT:
       handleServerText(ws, payload, len);
@@ -192,10 +208,21 @@ static void onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
 }
 
 static void netTask(void*) {
-  uint32_t lastWifiCheck = 0, lastHeartbeat = 0, lastPrint = 0;
+  uint32_t lastWifiCheck = 0, lastStatus = 0, lastPrint = 0;
 
   for (;;) {
     ws.loop();
+
+    // --- Status: cada 2 s y, sobre todo, en cuanto algo cambia. Lo inmediato
+    // no es un lujo: es lo que confirma un start/stop a server2, que si no
+    // tardaría hasta 2 s en dar por buena cada grabación. handleServerText()
+    // corre dentro del ws.loop() de arriba, así que un comando recién recibido
+    // se contesta en esta misma vuelta ---
+    if (ws.isConnected() && (statusDirty || millis() - lastStatus > STATUS_INTERVAL_MS)) {
+      statusDirty = false;  // antes de leer el estado: un cambio a mitad no se pierde
+      lastStatus = millis();
+      sendStatus(ws);
+    }
 
     // --- Watchdog de WiFi: fuerza reconexion si el auto-reconnect se atasca,
     // y arranca el SNTP si el WiFi apareció después de setup() ---
@@ -209,13 +236,6 @@ static void netTask(void*) {
         WiFi.disconnect();
         WiFi.begin(WIFI_SSID, WIFI_PASS);  // no bloquea; el estado cambia solo
       }
-    }
-
-    // --- Heartbeat cada 2 s: server2 lo usa para saber que seguimos vivos y
-    // reconciliar comandos perdidos (start/stop_broadcast) ---
-    if (millis() - lastHeartbeat > HEARTBEAT_INTERVAL_MS) {
-      lastHeartbeat = millis();
-      if (ws.isConnected()) sendHeartbeat(ws, broadcasting, recordingActive, uploadInFlight);
     }
 
     // --- Live view: lo que haya encolado el sampler ---
@@ -238,6 +258,10 @@ static void netTask(void*) {
 // ===================================================
 void setup() {
   Serial.begin(115200);
+
+  // Identifica este arranque en el status: dos boot_id distintos seguidos son
+  // un reinicio, y con el t_ms delatan un bucle de reinicios.
+  snprintf(bootId, sizeof(bootId), "%08x", (unsigned)esp_random());
 
   recorderMutex = xSemaphoreCreateMutex();
   sampleQueue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(Sample));

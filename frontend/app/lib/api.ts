@@ -10,6 +10,8 @@
 const SERVER2_URL = (process.env.NEXT_PUBLIC_SERVER2_URL ?? "").replace(/\/$/, "");
 const WS_SERVER2_BASE = SERVER2_URL.replace(/^http/, "ws");
 
+// Una grabación ya subida (o al menos con su fila creada). No existe fila para
+// la que se está grabando ahora mismo: eso vive solo en el status del aparato.
 export type Recording = {
   uuid: string;
   device_uuid: string;
@@ -17,6 +19,7 @@ export type Recording = {
   ended_at: string | null;
   file_path: string | null;
   duration_seconds: number | null;
+  uploaded_at: string | null; // null = la fila existe pero el binario no llegó a Storage
   username: string;
 };
 
@@ -24,28 +27,24 @@ export type Device = { uuid: string; username: string };
 
 // Mensajes que llegan por el WS de server2.
 export type DeviceOnlineMessage = { type: "device_online" | "device_offline"; uuid: string };
-export type RecordingStartedMessage = { type: "recording_started"; recording: Recording };
-export type RecordingStoppingMessage = { type: "recording_stopping"; uuid: string };
+// Una grabación acaba de terminar de subirse: ya tiene fila, toca refrescar.
 export type RecordingFinishedMessage = { type: "recording_finished"; uuid: string };
-// Estado real del aparato, derivado de su heartbeat (cada 2 s). Es lo que
-// distingue "grabando" de "subiendo" cuando no hemos visto el recording_stopping
-// — p. ej. si server2 se reinició, o si el browser entra a mitad de una subida.
+
+// Espejo del `status` de la ESP32 (cada 2 s y ante cualquier cambio). Es LO
+// ÚNICO de lo que se pinta el estado del aparato: aquí no se deduce nada.
+// Hay grabación en curso si y solo si `rec_uuid` no es null.
 export type DeviceStatusMessage = {
   type: "device_status";
   uuid: string;
-  recording: boolean;
-  uploading: boolean;
+  rec_uuid: string | null;
+  rec_started_epoch_ms: number | null; // t=0 de la grabación: es lo que le da nombre
+  uploading: boolean; // subiendo un fichero ahora mismo
+  pending: number; // ficheros en la SD esperando a subir
 };
 export type SampleMessage = { t: number; p: number; temp?: number };
 
 export const isDeviceOnline = (d: unknown): d is DeviceOnlineMessage =>
   typeof d === "object" && d !== null && ((d as DeviceOnlineMessage).type === "device_online" || (d as DeviceOnlineMessage).type === "device_offline");
-
-export const isRecordingStarted = (d: unknown): d is RecordingStartedMessage =>
-  typeof d === "object" && d !== null && (d as RecordingStartedMessage).type === "recording_started";
-
-export const isRecordingStopping = (d: unknown): d is RecordingStoppingMessage =>
-  typeof d === "object" && d !== null && (d as RecordingStoppingMessage).type === "recording_stopping";
 
 export const isRecordingFinished = (d: unknown): d is RecordingFinishedMessage =>
   typeof d === "object" && d !== null && (d as RecordingFinishedMessage).type === "recording_finished";
@@ -93,9 +92,12 @@ async function server2Request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export const startRecording = () => server2Request<Recording>("/recordings/start", { method: "POST" });
+// Las dos devuelven el estado del aparato ya confirmado por la ESP32 (server2
+// espera a su status antes de contestar), en el mismo formato que llega por WS.
+export const startRecording = () =>
+  server2Request<DeviceStatusMessage>("/recordings/start", { method: "POST" });
 export const stopRecording = () =>
-  server2Request<{ uuid: string; device_uuid: string; status: string }>("/recordings/stop", { method: "POST" });
+  server2Request<DeviceStatusMessage>("/recordings/stop", { method: "POST" });
 
 // --- Lecturas: rutas propias del frontend (Supabase por debajo, nunca desde el navegador) ---
 

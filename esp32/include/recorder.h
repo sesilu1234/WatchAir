@@ -11,6 +11,8 @@
 // El inicio va en ms, no en segundos, para que el t=0 del fichero sea un
 // instante exacto: con segundos truncados habría hasta 999 ms de desfase entre
 // lo que dice la cabecera y el origen contra el que se sellan las muestras.
+// Esa cabecera es también la que da nombre y `started_at` a la grabación en la
+// base de datos: el server los saca de aquí, nunca de un datetime.now().
 //
 // t_ms = ms desde ese inicio, sellados en el instante en que el sensor devolvió
 // la muestra (no cuando se escribe: entre una cosa y otra hay cola, mutex y
@@ -53,12 +55,26 @@ class Recorder {
   String currentUuid() const { return currentUuid_; }
   uint32_t elapsedSeconds() const;
 
-  // "" si arrancó bien; si no, el motivo, para mandarlo en el ACK.
+  // "" si arrancó bien; si no, el motivo, para mandarlo en el NACK.
   const char* start(const String& uuid, bool sensorOk);
   void stop();
   // `sampleMillis` es el millis() del instante en que se leyó el sensor, no el
   // de ahora: lo trae la muestra desde la tarea de muestreo. Corta sola a las 12 h.
   void sample(int16_t pCentiPa, uint32_t sampleMillis);
+
+  // --- instantánea para el `status` -----------------------------------------
+  //
+  // El status sale cada 2 s desde la tarea de red y NO puede tocar la SD ni
+  // esperar al candado: un flush lento dejaría el latido colgado. Estas tres
+  // copias se escriben bajo el candado (junto al estado que reflejan) y se leen
+  // sueltas desde fuera.
+  //
+  // El orden de escritura importa: al arrancar se pone la fecha antes que el
+  // uuid, y al parar se borra el uuid antes que la fecha, así que quien lea un
+  // uuid no vacío ve siempre su fecha ya puesta.
+  const char* recUuidSnapshot() const { return recUuidSnapshot_; }  // "" = no se graba
+  uint64_t startedEpochMsSnapshot() const { return startedEpochMsSnapshot_; }
+  uint16_t pendingSnapshot() const { return pendingCount_; }
 
   // --- subida ---
   std::vector<PendingUpload> listPending();  // /rec/*.bin salvo la que se graba ahora
@@ -87,11 +103,21 @@ class Recorder {
   uint32_t anchorMillis_ = 0;
   uint32_t deltaMs_ = 0;
 
+  // Ficheros en /rec que no son el que se graba ahora. Contador en RAM y no un
+  // listPending() por cada status: abrir e iterar el directorio cuesta cientos
+  // de ms en una tarjeta lenta. Se cuenta una vez en begin() y a partir de ahí
+  // lo mueven start/stop/resume/confirmUploaded.
+  uint16_t pendingCount_ = 0;
+
+  char recUuidSnapshot_[37] = "";
+  volatile uint64_t startedEpochMsSnapshot_ = 0;
+
   uint8_t writeBuf_[WRITE_BUFFER_RECORDS * RECORD_SIZE];
   size_t writeBufUsed_ = 0;
 
   static String binPath(const String& uuid) { return "/rec/" + uuid + ".bin"; }
   void flushWriteBuffer();
+  void publishSnapshot();  // vuelca currentUuid_/startedEpochMs_ a las copias
 };
 
 extern Recorder recorder;

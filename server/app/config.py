@@ -9,22 +9,33 @@ def _require(name: str) -> str:
 
 
 JWT_SHARED_SECRET = _require("JWT_SHARED_SECRET")
-DEVICE_SECRET = _require("DEVICE_SECRET")
 
 # server2 es el unico que escribe en Supabase (Postgres + Storage). El frontend
 # solo lee `devices` para resolver email -> uuid del aparato en el login.
 SUPABASE_URL = _require("SUPABASE_URL").rstrip("/")
 SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 
-# Aprovisionamiento hardcodeado: un aparato por usuario. Solo se usa para el
-# gate de auth del WS del ESP32; el username/email vive en Supabase.
-DEVICE_UUIDS = {
-    "8d257ddd-79bc-4fc7-969c-8ba42d315b22",  # Ulises
-    "01bbe27b-7b83-4247-839e-0826b23f473c",  # Angela
-    "af87778a-9e0c-4445-ad5e-62d78943272e",  # Minerva
-}
 
-# 3 s (un solo heartbeat de margen) era demasiado ajustado: un loop() lento en
+def _parse_device_secrets(raw: str) -> dict[str, str]:
+    """"uuid:secreto,uuid:secreto" -> {uuid: secreto}.
+
+    Un secreto por aparato, no uno compartido: con el compartido, cualquiera de
+    las ESP32 podia hacerse pasar por otra.
+    """
+    secrets: dict[str, str] = {}
+    for pair in raw.split(","):
+        uuid, sep, secret = pair.strip().partition(":")
+        if not sep or not uuid or not secret:
+            raise RuntimeError(f"DEVICE_SECRETS mal formado en: {pair!r}")
+        secrets[uuid] = secret
+    return secrets
+
+
+# Aprovisionamiento hardcodeado: un aparato por usuario. Las claves de este dict
+# son la lista blanca de UUIDs; el username/email vive en Supabase.
+DEVICE_SECRETS: dict[str, str] = _parse_device_secrets(_require("DEVICE_SECRETS"))
+
+# 3 s (un solo status de margen) era demasiado ajustado: un loop() lento en
 # el ESP32 bastaba para marcarlo offline y forzar reconexion en bucle.
 ONLINE_TIMEOUT_S = 7
 RECONCILE_GRACE_S = 3  # desajuste deseado/reportado que se tolera antes de reenviar

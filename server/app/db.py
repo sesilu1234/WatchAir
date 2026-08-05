@@ -13,49 +13,49 @@ _client: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY
 BUCKET = "watchair"
 
 # Todo esto es sincrono (supabase-py lo es); se llama siempre desde
-# asyncio.to_thread para no bloquear el event loop.
+# asyncio.to_thread para no bloquear el event loop. Los tres pasos de una subida
+# van en orden desde recordings.complete_upload y cada uno puede fallar por su
+# cuenta: la ESP32 reintenta la subida entera y repetir cualquiera sale gratis.
 
 
-def insert_recording(uuid: str, device_uuid: str, started_at: str):
-    """Crea la fila al arrancar la grabacion. Idempotente: el ESP32 reconcilia
-    el mismo uuid en cada reconexion (hello) y no debe chocar por primary key."""
+def upsert_recording(
+    uuid: str,
+    device_uuid: str,
+    started_at: datetime,
+    ended_at: datetime,
+    duration_seconds: int,
+    file_path: str,
+):
+    """Crea (o reescribe) la fila con lo que dice la cabecera del fichero.
+
+    `uploaded_at` no aparece a proposito: al insertar queda NULL por defecto, y
+    en un reintento se conserva el que ya hubiera en vez de volver a ponerlo a
+    NULL a mitad de camino.
+    """
     _client.table("recordings").upsert(
-        {"uuid": uuid, "device_uuid": device_uuid, "started_at": started_at},
+        {
+            "uuid": uuid,
+            "device_uuid": device_uuid,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+            "duration_seconds": duration_seconds,
+            "file_path": file_path,
+        },
         on_conflict="uuid",
-        ignore_duplicates=True,
     ).execute()
 
 
-def complete_recording(uuid: str, device_uuid: str, data: bytes):
-    """Sube el binario a Storage y cierra la fila. `ended_at` con valor +
-    `file_path` con valor = grabacion completa (el estado es derivado)."""
-    row = (
-        _client.table("recordings")
-        .select("started_at, device_uuid")
-        .eq("uuid", uuid)
-        .maybe_single()
-        .execute()
-    )
-    if row is None or row.data is None:
-        raise RuntimeError(f"la grabacion {uuid} no tiene fila en la BD")
-    # DEVICE_SECRET es el mismo para todos los aparatos: sin esto, cualquiera de
-    # ellos podria cerrar (y pisar el fichero de) la grabacion de otro.
-    if row.data["device_uuid"] != device_uuid:
-        raise RuntimeError(f"la grabacion {uuid} no es del aparato {device_uuid}")
-
-    file_path = f"{device_uuid}/{uuid}.bin"
+def upload_blob(file_path: str, data: bytes):
     _client.storage.from_(BUCKET).upload(
         file_path,
         data,
         {"content-type": "application/octet-stream", "upsert": "true"},
     )
 
-    ended_at = datetime.now(timezone.utc)
-    started_at = datetime.fromisoformat(row.data["started_at"].replace("Z", "+00:00"))
+
+def mark_uploaded(uuid: str):
+    """El binario ya esta en Storage. `uploaded_at` con valor = grabacion
+    completa y lista para pintar; NULL = la fila existe pero le falta el fichero."""
     _client.table("recordings").update(
-        {
-            "ended_at": ended_at.isoformat(),
-            "file_path": file_path,
-            "duration_seconds": int((ended_at - started_at).total_seconds()),
-        }
+        {"uploaded_at": datetime.now(timezone.utc).isoformat()}
     ).eq("uuid", uuid).execute()

@@ -15,8 +15,16 @@ const HEADER_SIZE_V3 = 4 + 1 + 16 + 1 + 8;
 const RECORD_SIZE = 6; // uint32 t_ms + int16 p_centiPa
 export const LOOP_TIME_MS = 40; // 25 Hz — debe coincidir con el firmware y server2
 
-// Regla de gaps: si el salto entre muestras consecutivas supera 2×LOOP_TIME,
-// no se unen esos puntos — se inserta un punto y=null para cortar la línea.
+// Un error de I2C (un cable que baila) hace que esa muestra no se encole y deja
+// un hueco en el fichero. No hay bytes centinela: el hueco ES el salto entre dos
+// t_ms consecutivos. Cortar la línea a la mínima (dos muestras perdidas) llenaría
+// la gráfica de agujeros por nada, así que solo se corta a partir de 1 s sin
+// datos, que ya es una desconexión de verdad y no un fallo suelto.
+const GAP_MS = 1000;
+
+// Regla de gaps: si el salto entre muestras consecutivas supera GAP_MS, no se
+// unen esos puntos — se inserta un punto y=null para cortar la línea (la serie
+// va con connectNulls: false, ver chartOption.ts).
 export function decodeRecording(buffer: Buffer): Point[] {
   if (buffer.length < HEADER_SIZE_V1) return [];
   const magic = buffer.toString("ascii", 0, 4);
@@ -39,7 +47,7 @@ export function decodeRecording(buffer: Buffer): Point[] {
     const pCentiPa = buffer.readInt16LE(offset + 4);
     if (t0 === null) t0 = tMs;
 
-    if (prevT !== null && tMs - prevT > 2 * LOOP_TIME_MS) {
+    if (prevT !== null && tMs - prevT > GAP_MS) {
       points.push([(prevT - t0) / 1000 + LOOP_TIME_MS / 2000, null]);
     }
     points.push([(tMs - t0) / 1000, pCentiPa / 100]);

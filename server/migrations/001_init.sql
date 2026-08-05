@@ -8,13 +8,17 @@ create table devices (
   created_at timestamptz not null default now()
 );
 
+-- La fila nace cuando la ESP32 sube el fichero, no al empezar a grabar: hasta
+-- entonces la grabación solo existe en su SD. started_at/ended_at salen de la
+-- cabecera del .bin, nunca de la hora del server.
 create table recordings (
   uuid              uuid primary key,
   device_uuid       uuid not null references devices(uuid),
   started_at        timestamptz not null,
-  ended_at          timestamptz,   -- null hasta que el binario está subido y confirmado en Storage
+  ended_at          timestamptz,
   file_path         text,          -- ruta dentro del bucket "watchair"
   duration_seconds  integer,
+  uploaded_at       timestamptz,   -- null = la fila existe pero el binario no llegó a Storage
   created_at        timestamptz not null default now()
 );
 
@@ -29,6 +33,7 @@ insert into devices (uuid, username, email) values
   ('01bbe27b-7b83-4247-839e-0826b23f473c', 'Angela',  'rochermunozangela@gmail.com'),
   ('af87778a-9e0c-4445-ad5e-62d78943272e', 'Minerva', 'minervaplarocher@gmail.com');
 
--- Para añadir a alguien más en el futuro: generar un UUID nuevo, hardcodearlo
--- en el firmware de su ESP32 (junto al DEVICE_SECRET compartido) y:
+-- Para añadir a alguien más en el futuro: generar un UUID nuevo y un secreto
+-- propio, hardcodearlos en el firmware de su ESP32 (esp32/include/secrets.h),
+-- añadir el par a DEVICE_SECRETS de server/.env y:
 -- insert into devices (uuid, username, email) values ('<uuid>', '<nombre>', '<email>');

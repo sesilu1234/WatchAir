@@ -1,10 +1,12 @@
 import "server-only";
 import { STORAGE_BUCKET, supabaseAdmin } from "./supabaseAdmin";
 
-// `ended_at` es null hasta que el binario está subido y confirmado en
-// Storage — no hay un `status` aparte, esa es la única señal persistida.
-// "grabando" vs "subiendo" es un estado transitorio que solo vive en el WS
-// de server2 (ver recording_started/recording_stopping/recording_finished).
+// Aquí solo hay grabaciones terminadas: la fila la crea server2 cuando la ESP32
+// le sube el fichero, así que la que se está grabando ahora mismo no aparece
+// (eso vive en el `status` del aparato, que llega por el WS de server2).
+//
+// `uploaded_at` null = la fila se creó pero el binario no llegó a Storage; la
+// ESP32 lo reintenta sola. Es la única señal persistida de "completa o no".
 export type Recording = {
   uuid: string;
   device_uuid: string;
@@ -12,10 +14,12 @@ export type Recording = {
   ended_at: string | null;
   file_path: string | null;
   duration_seconds: number | null;
+  uploaded_at: string | null;
   username: string;
 };
 
-const SELECT_WITH_USERNAME = "uuid, device_uuid, started_at, ended_at, file_path, duration_seconds, devices(username)";
+const SELECT_WITH_USERNAME =
+  "uuid, device_uuid, started_at, ended_at, file_path, duration_seconds, uploaded_at, devices(username)";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function withUsername(row: any): Recording {

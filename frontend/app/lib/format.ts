@@ -1,9 +1,11 @@
 // Formato de fechas y duraciones. El backend identifica las grabaciones por UUID,
-// así que el nombre visible se deriva de started_at.
+// así que el nombre visible se deriva de su inicio.
 const pad = (n: number) => String(n).padStart(2, "0");
 
-// "REC_20260728_100200" — nombre legible y ordenable de una grabación.
-export function recordingName(startedAt: string): string {
+// "REC_20260728_100200" — nombre legible y ordenable de una grabación. Admite el
+// started_at de la fila (ISO) y el rec_started_epoch_ms del status (ms): las dos
+// cosas son el mismo instante, el que dice la cabecera del fichero.
+export function recordingName(startedAt: string | number): string {
   const d = new Date(startedAt);
   if (Number.isNaN(d.getTime())) return "REC_—";
   return (
