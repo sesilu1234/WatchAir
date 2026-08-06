@@ -34,8 +34,8 @@ import {
 export default function RecordingsPage() {
   const compact = useCompact();
 
-  const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
-  const [status, setStatus] = useState<DeviceStatusMessage | null>(null);
+  const [reportedOnline, setReportedOnline] = useState<boolean | null>(null);
+  const [reportedStatus, setReportedStatus] = useState<DeviceStatusMessage | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,14 +59,14 @@ export default function RecordingsPage() {
     (data: unknown) => {
       if (isDeviceOnline(data)) {
         const online = data.type === "device_online";
-        setDeviceOnline(online);
+        setReportedOnline(online);
         // Desconectada: se descarta el último status en vez de dejarlo pintado.
         // Lo que dijera hace un rato ya no dice nada de lo que pasa ahora.
-        if (!online) setStatus(null);
+        if (!online) setReportedStatus(null);
         return;
       }
       if (isDeviceStatus(data)) {
-        setStatus(data);
+        setReportedStatus(data);
         return;
       }
       if (isRecordingFinished(data)) {
@@ -77,7 +77,17 @@ export default function RecordingsPage() {
     [refresh],
   );
 
-  const wsStatus = useFrontendSocket({ onMessage: handleMessage, onOpen: refresh });
+  // Sin `live`: aquí no se pinta ninguna gráfica, así que no se pide emisión.
+  const { status: wsStatus, fresh } = useFrontendSocket({
+    onMessage: handleMessage,
+    onOpen: refresh,
+  });
+
+  // Mismo criterio que con `device_offline`, solo que por silencio: sin noticias
+  // frescas no se sabe nada del aparato, y su último status ya no dice nada de
+  // lo que pasa ahora.
+  const deviceOnline = fresh ? reportedOnline : false;
+  const status = fresh ? reportedStatus : null;
 
   const startedEpochMs = status?.rec_started_epoch_ms ?? null;
   const recording = status?.rec_uuid != null;
@@ -102,7 +112,7 @@ export default function RecordingsPage() {
     setPending(true);
     setError(null);
     try {
-      setStatus(await action());
+      setReportedStatus(await action());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

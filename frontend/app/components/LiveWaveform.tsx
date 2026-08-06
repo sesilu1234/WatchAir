@@ -16,14 +16,14 @@ export default function LiveWaveform() {
   const samplesBuffer = useRef<number[]>([]);
   const compact = useCompact();
 
-  const [deviceOnline, setDeviceOnline] = useState<boolean | null>(null);
+  const [reportedOnline, setReportedOnline] = useState<boolean | null>(null);
   const [latestSample, setLatestSample] = useState({ pressure: 0, temperature: 0 });
   const [receiving, setReceiving] = useState(false);
   const receivingTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleMessage = (data: unknown) => {
     if (isDeviceOnline(data)) {
-      setDeviceOnline(data.type === "device_online");
+      setReportedOnline(data.type === "device_online");
       return;
     }
     if (isSample(data)) {
@@ -36,13 +36,17 @@ export default function LiveWaveform() {
     }
   };
 
-  const wsStatus = useFrontendSocket({
+  const { status: wsStatus, fresh } = useFrontendSocket({
     onMessage: handleMessage,
+    live: true, // esta es la única vista que pinta la señal
     onOpen: () => {
       samplesBuffer.current = [];
       setReceiving(false);
     },
   });
+
+  // Sin noticias frescas no queda nada que respalde el "conectada" de antes.
+  const deviceOnline = fresh ? reportedOnline : false;
 
   useEffect(() => () => clearTimeout(receivingTimeout.current), []);
 

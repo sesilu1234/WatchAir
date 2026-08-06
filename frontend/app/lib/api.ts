@@ -73,9 +73,12 @@ export async function getServer2Token(forceRefresh = false): Promise<string> {
 
 // Se llama en cada (re)conexión: si el WS se cerró por token caducado, esto
 // pide uno nuevo antes de reintentar.
-export async function buildServer2WsUrl(): Promise<string> {
-  const token = await getServer2Token();
-  return `${WS_SERVER2_BASE}/ws?token=${encodeURIComponent(token)}`;
+// `live` pide además las muestras: es lo que hace que server2 ponga a emitir a
+// la ESP32, así que solo lo pide quien va a pintar la señal.
+export async function buildServer2WsUrl(live = false): Promise<string> {
+  const qs = new URLSearchParams({ token: await getServer2Token() });
+  if (live) qs.set("live", "1");
+  return `${WS_SERVER2_BASE}/ws?${qs}`;
 }
 
 async function server2Request<T>(path: string, init?: RequestInit): Promise<T> {

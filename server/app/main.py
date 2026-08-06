@@ -77,7 +77,10 @@ async def recordings_stop(claims: BrowserClaims = Depends(browser_claims)):
 # WS navegador: live view, solo lectura (conectarse = suscribirse)
 # ===================================================
 @app.websocket("/ws")
-async def browser_ws(websocket: WebSocket, token: str):
+async def browser_ws(websocket: WebSocket, token: str, live: bool = False):
+    """`live=1` añade las muestras en vivo; sin él solo llega el estado. Es lo
+    único que decide si la ESP32 tiene que emitir: quien no pinta la señal no la
+    pide, y así /recordings no la pone a emitir a 25 Hz para nadie."""
     try:
         claims = verify_browser_token(token)
     except InvalidToken:
@@ -87,10 +90,12 @@ async def browser_ws(websocket: WebSocket, token: str):
     await websocket.accept()
     uuid = claims.device_uuid
     hub.subscribers.setdefault(uuid, set()).add(websocket)
+    if live:
+        hub.live_subscribers.setdefault(uuid, set()).add(websocket)
 
-    # Emisión como estado derivado: acabamos de pasar de 0 a >=1 suscriptor.
+    # Emisión como estado derivado: acabamos de pasar de 0 a >=1 suscriptor en vivo.
     dev = hub.devices.get(uuid)
-    if dev is not None:
+    if live and dev is not None:
         await dev.send({"type": "start_broadcast"})
     await websocket.send_json(
         {"type": "device_online" if dev is not None else "device_offline", "uuid": uuid}
@@ -115,14 +120,12 @@ async def browser_ws(websocket: WebSocket, token: str):
     except WebSocketDisconnect:
         pass
     finally:
-        subs = hub.subscribers.get(uuid)
-        if subs is not None:
-            subs.discard(websocket)
-            if not subs:
-                del hub.subscribers[uuid]
-                dev = hub.devices.get(uuid)
-                if dev is not None:
-                    await dev.send({"type": "stop_broadcast"})
+        hub.unsubscribe(hub.subscribers, uuid, websocket)
+        # Se fue el último que miraba la señal: ya no hay a quién emitir.
+        if live and hub.unsubscribe(hub.live_subscribers, uuid, websocket):
+            dev = hub.devices.get(uuid)
+            if dev is not None:
+                await dev.send({"type": "stop_broadcast"})
         if expired:
             await websocket.close(code=4401)
 
@@ -210,4 +213,4 @@ async def _handle_device_message(dev: hub.Device, data: dict):
         recordings.on_nack(dev, data)
     elif msg_type is None and "p" in data:
         # muestra en vivo {"t": ms, "p": presion, "temp": temperatura}, sin batching
-        await hub.notify(dev.uuid, data)
+        await hub.notify_live(dev.uuid, data)

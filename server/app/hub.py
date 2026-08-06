@@ -50,11 +50,14 @@ class Device:
 # reconstruye lo suyo con el `status` en cuanto reconecta.
 devices: dict[str, Device] = {}
 subscribers: dict[str, set[WebSocket]] = {}
+# Subconjunto de `subscribers`: los que ademas pidieron ?live=1 y reciben las
+# muestras. La emision se deriva de este, no de `subscribers`: /recordings mira
+# el estado del aparato pero no pinta ninguna grafica, y no tiene por que poner
+# a la ESP32 a emitir a 25 Hz para nadie.
+live_subscribers: dict[str, set[WebSocket]] = {}
 
 
-async def notify(uuid: str, message: dict):
-    """Empuja a los browsers que miran ese aparato."""
-    subs = subscribers.get(uuid)
+async def _push(subs: set[WebSocket] | None, message: dict):
     if not subs:
         return
     for ws in list(subs):
@@ -62,6 +65,28 @@ async def notify(uuid: str, message: dict):
             await ws.send_json(message)
         except Exception:
             subs.discard(ws)
+
+
+async def notify(uuid: str, message: dict):
+    """Empuja a los browsers que miran ese aparato."""
+    await _push(subscribers.get(uuid), message)
+
+
+async def notify_live(uuid: str, message: dict):
+    """Solo a los que estan pintando la señal."""
+    await _push(live_subscribers.get(uuid), message)
+
+
+def unsubscribe(registry: dict[str, set[WebSocket]], uuid: str, ws: WebSocket) -> bool:
+    """Saca el socket del registro. True si con eso se queda sin nadie."""
+    subs = registry.get(uuid)
+    if subs is None:
+        return False
+    subs.discard(ws)
+    if subs:
+        return False
+    del registry[uuid]
+    return True
 
 
 async def expire_offline():
@@ -83,7 +108,7 @@ async def reconcile_broadcast():
     comando, asi que ahi no hay nada que reconciliar."""
     now = time.monotonic()
     for uuid, dev in list(devices.items()):
-        desired = bool(subscribers.get(uuid))  # >=1 browser mirando => hay que emitir
+        desired = bool(live_subscribers.get(uuid))  # >=1 browser en vivo => hay que emitir
         if desired == dev.broadcasting:
             dev.mismatch_since = None
         elif dev.mismatch_since is None:
