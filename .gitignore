@@ -23,9 +23,15 @@ yarn-debug.log*
 pnpm-debug.log*
 
 # Environment and secrets
-
+.env
+.env.*
+!.env.example
 *.key
 *.crt
+*.pem
+
+# PlatformIO
+.pio/
 
 # Editors
 .vscode/
