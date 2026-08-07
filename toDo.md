@@ -1,28 +1,4 @@
-- load:0x40078000,len:13232
-  load:0x40080400,len:3028
-  entry 0x400805e4
-  [ 892][E][sd_diskio.cpp:806] sdcard_mount(): f_mount failed: (1) A hard error occurred in the low level disk I/O layer
-  [ 1705][E][sd_diskio.cpp:806] sdcard_mount(): f_mount failed: (3) The physical drive cannot work
-  [ 2520][E][sd_diskio.cpp:806] sdcard_mount(): f_mount failed: (1) A hard error occurred in the low level disk I/O layer
-  [ 3333][E][sd_diskio.cpp:806] sdcard_mount(): f_mount failed: (3) The physical drive cannot work
-  [ 4148][E][sd_diskio.cpp:806] sdcard_mount(): f_mount failed: (1) A hard error occurred in the low level disk I/O layer
-  SD no detectada: la grabacion no va a funcionar hasta que se resuelva.
-  Connecting to WiFi: PR_2.4GHz
-  ..
-  OK, IP local ESP32: 192.168.1.110
-  SNTP arrancado
-  WS conectado a server2
-  WiFi: 3, WS: 1, broadcasting: 0, recording: 0, subiendo: 0
 
-WiFi: 3, WS: 1, broadcasting: 0, recording: 0, subiendo: 0
-
-WiFi: 3, WS: 1, broadcasting: 0, recording: 0, subiendo: 0
-
-WiFi: 3, WS: 1, broadcasting: 0, recording: 0, subiendo: 0
-
-que si no puede inicializaar disk que avise por server
-
-y poner mas bonito el print ese, icnliyendo si ntp y disk estan inicilizados , y poner que es el 3 del wifi...
 
 - una grabacion rejected no atasca la cola (o si reintenta hasta el infinito y blockea)? pero te jode y se queda basura... si devuelve un 400 la request, borrar fichero...
 

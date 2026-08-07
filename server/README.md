@@ -1,35 +1,48 @@
 # WatchAir server
 
-Relay WebSocket (FastAPI) entre el ESP32 (`/sensor`) y el frontend (`/frontend`).
+FastAPI relay between the ESP32 boards (`/sensor`) and the frontend (`/frontend`).
 
-Gestionado con [uv](https://docs.astral.sh/uv/): `pyproject.toml` declara las dependencias y `uv.lock` las fija para que el entorno sea idéntico en tu máquina y en el EC2. No hace falta crear ni activar un venv a mano, `uv run` lo maneja solo.
+Managed with [uv](https://docs.astral.sh/uv/): `pyproject.toml` declares the dependencies and `uv.lock` pins them, so the environment is identical on your machine and on EC2. No need to create or activate a venv by hand — `uv run` handles it.
 
 ## Setup
 
-Instalar uv (si no lo tenés):
-
 ```bash
-pip install uv
+pip install uv          # if you don't have it
+uv sync                 # install dependencies
+cp .env.example .env    # then fill in every variable
 ```
 
-Instalar dependencias del proyecto:
+All variables in `.env` are required: `app/config.py` fails at startup rather than mid-request.
+
+## Run
+
+From this directory:
 
 ```bash
-uv sync
+# development (auto-reload)
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+
+# production
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-## Ejecutar
+## Endpoints
 
-Desarrollo (recarga automática):
+| Endpoint | Client | Purpose |
+| --- | --- | --- |
+| `POST /recordings/start`, `POST /recordings/stop` | browser | Recording control (`Authorization: Bearer <JWT>`) |
+| `WS /ws?token=…&live=1` | browser | Device status; `live=1` also streams samples |
+| `WS /device/ws?uuid=…&secret=…` | ESP32 | Control channel |
+| `POST /device/upload?uuid=…&secret=…&recording=…` | ESP32 | Uploads the finished `.bin` |
 
-```bash
-uv run uvicorn server_ws:app --reload --host 0.0.0.0 --port 8080
+## Logs
+
+One line per event, UTC with milliseconds, same format for the app and for uvicorn:
+
+```
+2026-08-07 15:36:20.253Z  INFO  uvicorn.access      127.0.0.1:57193 - "POST /recordings/start HTTP/1.1" 401
+2026-08-07 15:36:20.879Z  INFO  watchair.recordings Recording rec-abc iniciada en device dev-uuid-1
+2026-08-07 15:36:20.879Z  WARN  watchair.hub        Device dev-uuid-1 sin status: se marca offline
 ```
 
-Producción:
-
-```bash
-uv run uvicorn server_ws:app --host 0.0.0.0 --port 8080
-```
-
-`GET /` devuelve un estado básico (si el ESP32 está conectado y cuántos frontends hay) para comprobar que el servidor está vivo sin necesitar un cliente WebSocket.
+Everything goes to stderr. The format lives in `app/log_config.py`.

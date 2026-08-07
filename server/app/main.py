@@ -16,11 +16,11 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import config, hub, recordings
+from . import config, hub, log_config, recordings
 from .auth import BrowserClaims, InvalidToken, verify_browser_token
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("watchair")
+log_config.setup()
+log = logging.getLogger("watchair.main")
 
 
 @asynccontextmanager
@@ -31,13 +31,24 @@ async def lifespan(app: FastAPI):
 
 
 async def _reconcile_loop():
+    failures = 0
     while True:
         await asyncio.sleep(1)
         try:
             await hub.expire_offline()
             await hub.reconcile_broadcast()
         except Exception:
-            log.exception("Fallo en el bucle de reconciliación")
+            # Esto tickea cada segundo: sin amortiguar, un fallo persistente
+            # escupe un traceback por segundo y deja el log inservible. Se
+            # mantiene el traceback (es lo único que dice dónde rompió) pero
+            # como mucho uno por minuto mientras siga fallando.
+            if failures % 60 == 0:
+                log.exception("Fallo en el bucle de reconciliación")
+            failures += 1
+        else:
+            if failures:
+                log.info("Bucle de reconciliación recuperado tras %d fallos", failures)
+                failures = 0
 
 
 app = FastAPI(lifespan=lifespan)
