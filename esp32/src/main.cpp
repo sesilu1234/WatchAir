@@ -41,7 +41,7 @@ constexpr int SD_CS_PIN = 5;
 // El defecto de la librería son 4 MHz, un techo de 500 kB/s que era el cuello
 // de botella real de la subida. Si tu módulo/cableado no aguanta 20 MHz, baja
 // a 10000000: el síntoma es que SD.begin() falle o devuelva datos corruptos.
-constexpr uint32_t SD_SPI_HZ = 20000000;
+constexpr uint32_t SD_SPI_HZ = 4000000;
 
 // Una muestra ya lista para escribir o emitir.
 struct Sample {
