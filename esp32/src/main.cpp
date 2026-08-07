@@ -245,11 +245,22 @@ static void netTask(void*) {
     }
 
     // --- Diagnostico periodico ---
-    if (millis() - lastPrint > 10000) {
-      lastPrint = millis();
-      Serial.printf("WiFi: %d, WS: %d, broadcasting: %d, recording: %d, subiendo: %d\n\n",
-                    WiFi.status(), ws.isConnected(), broadcasting, recordingActive, uploadInFlight);
-    }
+   if (millis() - lastPrint > 10000) {
+    lastPrint = millis();
+
+    Serial.println("========== STATUS ==========");
+    Serial.printf("WiFi         : %s\n",
+                  WiFi.status() == WL_CONNECTED ? "CONNECTED" : "DISCONNECTED");
+    Serial.printf("WebSocket    : %s\n",
+                  ws.isConnected() ? "CONNECTED" : "DISCONNECTED");
+    Serial.printf("Broadcasting : %s\n",
+                  broadcasting ? "YES" : "NO");
+    Serial.printf("Recording    : %s\n",
+                  recordingActive ? "YES" : "NO");
+    Serial.printf("Uploading    : %s\n",
+                  uploadInFlight ? "YES" : "NO");
+    Serial.println("============================\n");
+}
 
     vTaskDelay(pdMS_TO_TICKS(5));  // cede CPU; el live view tolera 5 ms de latencia
   }
@@ -288,6 +299,7 @@ void setup() {
   if (!sdReady) {
     Serial.println("SD no detectada: la grabacion no va a funcionar hasta que se resuelva.");
   } else {
+    Serial.println("SD detectada y montada correctamente.");
     recorder.begin();
   }
 
