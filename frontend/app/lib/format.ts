@@ -14,6 +14,12 @@ export function recordingName(startedAt: string | number): string {
   );
 }
 
+// Nombre visible de una grabación ya guardada: el que le puso el usuario si hay
+// alguno, y si no el derivado del inicio. `name` en blanco cuenta como sin poner.
+export function displayName(recording: { name: string | null; started_at: string }): string {
+  return recording.name?.trim() || recordingName(recording.started_at);
+}
+
 // "00:03:27" — cronómetro de la grabación en curso y duración de las terminadas.
 export function formatClock(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));

@@ -5,30 +5,22 @@
 [23:17, 06/08/2026] ulisesplarocher:
 -mirar logs para ver que hay mal y que mejorar
 -poner mas logs
--poner timestamps en logs (pro y bien)
--posibilidad de borrar delete grabaciones desde ui (select all tambien )
+
+
 -cuidado que a veces clicka /recordings y pone desconectado al pricnipio. deberia ser conectando...
 
--quizas modificar ui , la tabla de recordings está feo . creo
-[23:24, 06/08/2026] ulisesplarocher: y poner algo debajo en /recording tipo metricas, pero memo y dummy por ahora, pero para dar mas aire y espacio
-[00:34, 07/08/2026] ulisesplarocher: Barra de losding o info de como va upload...porque tarda bastante...
 
-Que pasa?
 
 Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante y va traqueteando
-[10:37, 07/08/2026] ulisesplarocher: -para borrar mensajes tienes que escribir "delete recordings"
 
-- que si estas en pantalla grande grafica en pc puedes moverte de izquierda a derecha con arrows keys
-
-- check que te permita ver por hora, o por tiempo en la grabacion
+-algo de que habian mazo request para reconectarse (del esp32 ) o algo asi . en los log ah y tambien bots externos intentado hackear o conectarse
 
 
--Percentage uploaded, desde server
-
-[18:31, 07/08/2026] ulisesplarocher: Que te sale recording si estas recording tambien en live view
-[18:31, 07/08/2026] ulisesplarocher: Poder cambiar nombre de grabacions
 
 
+
+
+-- mm UI empieza a ir un poco lento, en especial la grafica
 
 
 

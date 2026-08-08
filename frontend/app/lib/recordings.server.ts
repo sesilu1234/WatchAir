@@ -15,11 +15,12 @@ export type Recording = {
   file_path: string | null;
   duration_seconds: number | null;
   uploaded_at: string | null;
+  name: string | null; // null = sin nombre propio; se deriva del inicio
   username: string;
 };
 
 const SELECT_WITH_USERNAME =
-  "uuid, device_uuid, started_at, ended_at, file_path, duration_seconds, uploaded_at, devices(username)";
+  "uuid, device_uuid, started_at, ended_at, file_path, duration_seconds, uploaded_at, name, devices(username)";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function withUsername(row: any): Recording {
@@ -62,6 +63,37 @@ export async function downloadRecordingFile(filePath: string): Promise<Buffer> {
   return Buffer.from(await data.arrayBuffer());
 }
 
-// Las escrituras (crear la fila, subir el .bin a Storage, cerrar la grabación)
-// las hace server2 directamente contra Supabase — ver server/app/db.py. Aquí
-// solo quedan lecturas.
+// Las escrituras del ciclo de vida de una grabación (crear la fila, subir el
+// .bin a Storage, cerrarla) las hace server2 directamente contra Supabase — ver
+// server/app/db.py. Lo que sigue es lo único que escribe el frontend: las dos
+// acciones que dispara el usuario desde el historial.
+
+// Renombrar. `null` (o en blanco) borra el nombre propio y devuelve la
+// grabación a su nombre derivado del inicio.
+export async function renameRecording(uuid: string, name: string | null): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("recordings")
+    .update({ name: name?.trim() || null })
+    .eq("uuid", uuid);
+  if (error) throw new Error(`No se pudo renombrar la grabación: ${error.message}`);
+}
+
+// Borrar: primero el binario de Storage y después las filas. En ese orden,
+// porque si falla el segundo paso queda una fila sin fichero (un estado que la
+// UI ya sabe pintar) en vez de un fichero huérfano que nadie volvería a mirar.
+export async function deleteRecordings(uuids: string[]): Promise<void> {
+  const { data, error: readError } = await supabaseAdmin
+    .from("recordings")
+    .select("file_path")
+    .in("uuid", uuids);
+  if (readError) throw new Error(`No se pudieron leer las grabaciones: ${readError.message}`);
+
+  const paths = (data ?? []).map((r) => r.file_path).filter((p): p is string => !!p);
+  if (paths.length > 0) {
+    const { error } = await supabaseAdmin.storage.from(STORAGE_BUCKET).remove(paths);
+    if (error) throw new Error(`No se pudieron borrar los ficheros: ${error.message}`);
+  }
+
+  const { error } = await supabaseAdmin.from("recordings").delete().in("uuid", uuids);
+  if (error) throw new Error(`No se pudieron borrar las grabaciones: ${error.message}`);
+}

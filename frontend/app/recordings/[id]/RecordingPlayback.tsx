@@ -1,32 +1,52 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ECharts } from "echarts";
-import { ACCENT, INK, MONO, PAPER } from "../../theme";
+import { ACCENT, INK, MONO, PAPER, SIGNAL_NEG, SIGNAL_POS } from "../../theme";
 import { fetchRecordingSamples, type Recording } from "../../lib/api";
 import {
+  displayName,
   durationSeconds,
   formatDate,
   formatClock,
   formatNumber,
   formatTime,
-  recordingName,
 } from "../../lib/format";
 import { useCompact } from "../../lib/useCompact";
 import { useFullscreen } from "../../lib/useFullscreen";
 import {
   chartOption,
+  chartTimePatch,
   chartViewPatch,
   chartYPatch,
   defaultRange,
   formatRange,
-  formatWindow,
+  formatVisible,
   rangeIndex,
-  visibleSeconds,
+  visibleRange,
   Y_RANGES,
   type ChartView,
   type Points,
+  type TimeAxis,
+  type TimeMode,
+  type VisibleRange,
 } from "./chartOption";
+import {
+  analyseBreathing,
+  phaseSplit,
+  pressureHistogram,
+  type Breathing,
+  type Histogram,
+  type PhaseSplit,
+} from "./breathing";
 import { BackLink, Stat, mobile, styles } from "./ui";
+
+// Velocidad del desplazamiento con las flechas, en ventanas visibles por
+// segundo: 0,4 = la pantalla entera tarda dos segundos y medio en pasar. Va en
+// fracción de lo que se ve, así que se siente igual de suave con la grabación
+// entera delante que con diez segundos.
+const PAN_SPEED = 0.4;
+const PAN_FAST = 3; // con Shift
+const PAN_TAP = 0.04; // empujón del toque corto, antes de que arranque el bucle
 
 // Vista de una grabación ya terminada: no hay tiempo real, se pinta el CSV entero.
 export default function RecordingPlayback({ recording }: { recording: Recording }) {
@@ -34,8 +54,10 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
   const [error, setError] = useState<string | null>(null);
   // Escala del eje Y: se propone una al cargar y a partir de ahí manda el usuario.
   const [chosenRange, setChosenRange] = useState<number | null>(null);
-  // Segundos de grabación que caben ahora mismo en pantalla (lo dice la gráfica).
-  const [visible, setVisible] = useState<number | null>(null);
+  // Tramo de la grabación que se está viendo ahora mismo (lo dice la gráfica).
+  const [visible, setVisible] = useState<VisibleRange | null>(null);
+  // Rótulos del eje X: duración desde el principio, o la hora real del reloj.
+  const [timeMode, setTimeMode] = useState<TimeMode>("elapsed");
   const compact = useCompact();
   // La tarjeta entera es lo que se va a pantalla completa: así el título y el
   // botón de salir siguen ahí dentro. En el móvil, además, en horizontal: en
@@ -59,8 +81,18 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
   }, [recording.uuid]);
 
   const started = new Date(recording.started_at);
+  const name = displayName(recording);
   const seconds = durationSeconds(recording.started_at, recording.ended_at);
   const summary = useMemo(() => describe(points), [points]);
+  const breathing = useMemo(() => analyseBreathing(points), [points]);
+  const histogram = useMemo(() => (points ? pressureHistogram(points) : null), [points]);
+  const split = useMemo(() => (points ? phaseSplit(points) : null), [points]);
+  // Sobre `started_at` y no sobre `started`: un Date nuevo en cada render haría
+  // que esto cambiase de identidad siempre y la gráfica se reparchease en vano.
+  const time = useMemo<TimeAxis>(
+    () => ({ mode: timeMode, startedMs: Date.parse(recording.started_at) }),
+    [timeMode, recording.started_at],
+  );
   // Cuenta muestras reales: los puntos y=null son marcadores de hueco, no datos.
   const sampleCount = useMemo(() => points?.filter(([, p]) => p !== null).length ?? null, [points]);
   // Sin estado intermedio: mientras el usuario no toque los botones vale la
@@ -72,12 +104,24 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
     <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <BackLink />
       <header style={{ ...styles.header, ...(compact ? mobile.header : null) }}>
-        <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>
-          {recordingName(recording.started_at)}
-        </h1>
-        <p style={styles.subtitle}>
-          {formatDate(started)} · {formatTime(started)} · {recording.username}
-        </p>
+        <div>
+          <h1 style={{ ...styles.title, ...(compact ? mobile.title : null) }}>{name}</h1>
+          <p style={styles.subtitle}>
+            {formatDate(started)} · {formatTime(started)} · {recording.username}
+          </p>
+        </div>
+        <a
+          href={`/api/recordings/${recording.uuid}/data?format=csv`}
+          download={`${name}.csv`}
+          style={{
+            ...styles.button,
+            ...styles.buttonAccent,
+            ...(compact ? mobile.button : null),
+          }}
+        >
+          <DownloadIcon />
+          Descargar CSV
+        </a>
       </header>
 
       <div style={{ ...styles.bar, ...(compact ? mobile.bar : null) }}>
@@ -89,19 +133,6 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
         />
         <Stat label="Mín / Máx" value={summary ? `${summary.min} / ${summary.max} Pa` : "—"} />
         <Stat label="Media" value={summary ? `${summary.mean} Pa` : "—"} />
-        <a
-          href={`/api/recordings/${recording.uuid}/data?format=csv`}
-          download={`${recordingName(recording.started_at)}.csv`}
-          style={{
-            ...styles.button,
-            ...styles.buttonAccent,
-            marginLeft: "auto",
-            ...(compact ? mobile.button : null),
-          }}
-        >
-          <DownloadIcon />
-          Descargar CSV
-        </a>
       </div>
 
       <section
@@ -116,7 +147,10 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
           <span style={styles.cardTitle}>Flujo de aire (Presión) · Pa</span>
           <div style={playbackStyles.headerActions}>
             <span style={playbackStyles.hint}>{zoomHint(compact, fullscreen)}</span>
-            {visible != null && <Readout label="Ventana" value={formatWindow(visible)} />}
+            {visible != null && (
+              <Readout label="Ventana" value={formatVisible(visible, time)} wide />
+            )}
+            <TimeModeControls mode={timeMode} onChange={setTimeMode} />
             {range != null && <ScaleControls range={range} onChange={setChosenRange} />}
             <FullscreenButton active={fullscreen} onToggle={toggleFullscreen} />
           </div>
@@ -126,10 +160,195 @@ export default function RecordingPlayback({ recording }: { recording: Recording 
           error={error}
           view={{ compact, fullscreen }}
           range={range}
+          time={time}
           onWindow={setVisible}
         />
       </section>
+
+      <BreathingSection
+        breathing={breathing}
+        histogram={histogram}
+        split={split}
+        loading={points == null}
+      />
     </main>
+  );
+}
+
+// --- Análisis de la respiración ---
+//
+// Todo sale de las mismas muestras que pinta la gráfica (ver breathing.ts): no
+// hay ninguna llamada extra ni nada guardado en el servidor.
+//
+// Los dos gráficos comparten el mismo par de colores y el mismo significado:
+// el color sólo dice de qué lado del cero está la señal, nunca cuánto vale.
+// El cuánto lo dice el alto de la barra o el tamaño de la porción.
+
+// memo: desplazarse con las flechas dispara un evento de zoom por frame, y sin
+// esto la sección entera se repintaría 60 veces por segundo para no cambiar
+// nada. Sus cuatro props salen de useMemo, así que la comparación siempre acierta.
+const BreathingSection = memo(function BreathingSection({
+  breathing,
+  histogram,
+  split,
+  loading,
+}: {
+  breathing: Breathing | null;
+  histogram: Histogram | null;
+  split: PhaseSplit | null;
+  loading: boolean;
+}) {
+  const compact = useCompact();
+
+  return (
+    <section style={{ ...styles.section, ...(compact ? mobile.section : null) }}>
+      <div style={styles.sectionHead}>
+        <span style={styles.sectionTitle}>Análisis de la respiración</span>
+        <p style={styles.sectionNote}>Calculado sobre la señal · cruces por cero</p>
+      </div>
+
+      {breathing == null ? (
+        <p style={playbackStyles.sectionEmpty}>
+          {loading
+            ? "Calculando…"
+            : "No se han detectado ciclos respiratorios claros en esta señal."}
+        </p>
+      ) : (
+        <>
+          {/* Tres y no seis: "ciclo medio" era 60/rpm otra vez dicho, y el ratio
+              de fases es justo lo que enseña la tarta de aquí abajo. */}
+          <div style={{ ...styles.bar, ...(compact ? mobile.bar : null) }}>
+            <Stat label="Frecuencia respiratoria" value={`${formatNumber(breathing.rpm, 1)} rpm`} />
+            <Stat label="Amplitud pico a pico" value={`${formatNumber(breathing.amplitude, 1)} Pa`} />
+            <Stat label="Regularidad" value={`± ${formatNumber(breathing.cycleSpread, 1)} s`} />
+          </div>
+
+          <div style={{ ...playbackStyles.plots, ...(compact ? playbackStyles.plotsCompact : null) }}>
+            {split && <PhaseSplitPlot split={split} />}
+            {histogram && <PressureHistogramPlot histogram={histogram} />}
+          </div>
+        </>
+      )}
+    </section>
+  );
+});
+
+// Leyenda de los dos gráficos: el color no dice nada por sí solo, y menos con
+// este par (rojo y azul tienen casi la misma claridad, ver theme.ts). Vive en la
+// cabecera del histograma, que es el único que no rotula sus propios colores.
+function PhaseLegend() {
+  return (
+    <span style={playbackStyles.legend}>
+      <span style={playbackStyles.legendItem}>
+        <span style={{ ...playbackStyles.legendSwatch, background: SIGNAL_POS }} />
+        Inspiración +
+      </span>
+      <span style={playbackStyles.legendItem}>
+        <span style={{ ...playbackStyles.legendSwatch, background: SIGNAL_NEG }} />
+        Espiración −
+      </span>
+    </span>
+  );
+}
+
+function Plot({
+  title,
+  note,
+  children,
+}: {
+  title: string;
+  note: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <figure style={playbackStyles.plot}>
+      <figcaption style={playbackStyles.plotHead}>
+        <span style={playbackStyles.plotTitle}>{title}</span>
+        <span style={playbackStyles.plotNote}>{note}</span>
+      </figcaption>
+      {children}
+    </figure>
+  );
+}
+
+// Cuánto del tiempo se pasó a cada lado del cero. Es la misma pregunta que
+// respondía el "ratio fase + / −", pero en porcentaje y de un vistazo.
+//
+// Sin librería: una tarta de dos porciones es un conic-gradient. Los números van
+// escritos al lado, que es lo que de verdad se lee — el círculo sólo dice si
+// está repartido o torcido.
+function PhaseSplitPlot({ split }: { split: PhaseSplit }) {
+  const positive = split.positive * 100;
+  const label = (fraction: number) => `${formatNumber(fraction * 100, 1)} %`;
+
+  return (
+    <Plot title="Reparto del tiempo" note="muestra a muestra">
+      <div style={playbackStyles.pieRow}>
+        <span
+          style={{
+            ...playbackStyles.pie,
+            background: `conic-gradient(${SIGNAL_POS} 0 ${positive}%, ${SIGNAL_NEG} ${positive}% 100%)`,
+          }}
+          title={`Inspiración ${label(split.positive)} · Espiración ${label(split.negative)}`}
+        />
+        <div style={playbackStyles.pieKeys}>
+          <PieKey color={SIGNAL_POS} label="Inspiración" value={label(split.positive)} />
+          <PieKey color={SIGNAL_NEG} label="Espiración" value={label(split.negative)} />
+        </div>
+      </div>
+    </Plot>
+  );
+}
+
+// La cifra debajo de su etiqueta y alineada con ella, no al otro lado de la
+// tarjeta: es el dato, y tiene que leerse junto a lo que nombra.
+function PieKey({ color, label, value }: { color: string; label: string; value: string }) {
+  return (
+    <div style={playbackStyles.pieKey}>
+      <span style={playbackStyles.pieKeyHead}>
+        <span style={{ ...playbackStyles.legendSwatch, background: color }} />
+        {label}
+      </span>
+      <span style={playbackStyles.pieKeyValue}>{value}</span>
+    </div>
+  );
+}
+
+// Cuánto tiempo pasó la señal en cada nivel de presión. Una respiración normal
+// sale como dos lomas simétricas; si sale torcida, es que un lado dura o pega
+// más que el otro.
+function PressureHistogramPlot({ histogram }: { histogram: Histogram }) {
+  const { counts, limit, peak } = histogram;
+  const step = (2 * limit) / counts.length;
+
+  // La nota "±X Pa" que había aquí ya la dice el eje de abajo: el hueco es para
+  // la leyenda, que es lo único que explica los colores de los dos gráficos.
+  return (
+    <Plot title="Distribución de presión" note={<PhaseLegend />}>
+      <div style={playbackStyles.histogram}>
+        {counts.map((n, i) => {
+          const from = -limit + i * step;
+          return (
+            <span
+              key={i}
+              style={{
+                ...playbackStyles.bar,
+                background: from < 0 ? SIGNAL_NEG : SIGNAL_POS,
+                height: `${Math.max(1, (n / peak) * 100)}%`,
+                flex: "1 1 0",
+                minWidth: 2,
+              }}
+              title={`${formatNumber(from, 1)} … ${formatNumber(from + step, 1)} Pa · ${formatNumber(n)} muestras`}
+            />
+          );
+        })}
+      </div>
+      <div style={playbackStyles.axis}>
+        <span>{`−${formatNumber(limit, 1)}`}</span>
+        <span>0</span>
+        <span>{`+${formatNumber(limit, 1)}`}</span>
+      </div>
+    </Plot>
   );
 }
 
@@ -145,13 +364,15 @@ function ChartArea({
   error,
   view,
   range,
+  time,
   onWindow,
 }: {
   points: Points | null;
   error: string | null;
   view: ChartView;
   range: number | null;
-  onWindow: (seconds: number) => void;
+  time: TimeAxis;
+  onWindow: (range: VisibleRange) => void;
 }) {
   const inline = view.compact && !view.fullscreen;
   if (error != null)
@@ -163,6 +384,7 @@ function ChartArea({
     <PressureChart
       points={points}
       range={range}
+      time={time}
       onWindow={onWindow}
       compact={view.compact}
       fullscreen={view.fullscreen}
@@ -179,12 +401,77 @@ function Placeholder({ text, inline }: { text: string; inline: boolean }) {
 }
 
 // Rótulo de cabecera: etiqueta pequeña + valor en mono, como los de la barra.
-function Readout({ label, value }: { label: string; value: string }) {
+// `wide` reserva el ancho: el de la ventana cambia con cada paso del desplazamiento
+// y sin un ancho fijo iría empujando a los botones de al lado.
+function Readout({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
   return (
     <span style={playbackStyles.readout}>
       <span style={playbackStyles.readoutLabel}>{label}</span>
-      <span style={playbackStyles.readoutValue}>{value}</span>
+      <span style={{ ...playbackStyles.readoutValue, ...(wide ? playbackStyles.readoutWide : null) }}>
+        {value}
+      </span>
     </span>
+  );
+}
+
+// Duración desde el principio, o la hora del reloj. Lo mismo pintado, sólo
+// cambia cómo se rotula: a los 20 min de una grabación que empezó a las 22:00,
+// el eje pone "20:00" o "22:20".
+function TimeModeControls({
+  mode,
+  onChange,
+}: {
+  mode: TimeMode;
+  onChange: (mode: TimeMode) => void;
+}) {
+  return (
+    <span style={playbackStyles.readout}>
+      <span style={playbackStyles.readoutLabel}>Eje X</span>
+      <ModeButton
+        label="Duración"
+        title="Rotular el eje con el tiempo desde el inicio de la grabación"
+        active={mode === "elapsed"}
+        onClick={() => onChange("elapsed")}
+      />
+      <ModeButton
+        label="Hora"
+        title="Rotular el eje con la hora real a la que pasó"
+        active={mode === "clock"}
+        onClick={() => onChange("clock")}
+      />
+    </span>
+  );
+}
+
+function ModeButton({
+  label,
+  title,
+  active,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      aria-pressed={active}
+      style={{
+        ...playbackStyles.modeButton,
+        ...(active ? playbackStyles.modeButtonOn : null),
+        ...(hover && !active ? playbackStyles.stepButtonHover : null),
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -276,22 +563,26 @@ function FullscreenButton({ active, onToggle }: { active: boolean; onToggle: () 
 function PressureChart({
   points,
   range,
+  time,
   onWindow,
   compact,
   fullscreen,
 }: {
   points: Points;
   range: number;
-  onWindow: (seconds: number) => void;
+  time: TimeAxis;
+  onWindow: (range: VisibleRange) => void;
   compact: boolean;
   fullscreen: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ECharts | null>(null);
-  // echarts se carga de forma asíncrona: cuando termine puede que la vista o la
-  // escala ya hayan cambiado, así que las lee de aquí y no del closure.
+  // echarts se carga de forma asíncrona: cuando termine puede que la vista, la
+  // escala o los rótulos ya hayan cambiado, así que los lee de aquí y no del
+  // closure.
   const viewRef = useRef<ChartView>({ compact, fullscreen });
   const rangeRef = useRef(range);
+  const timeRef = useRef(time);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -308,9 +599,9 @@ function PressureChart({
       const instance = echarts.init(container, undefined, { renderer: "canvas" });
       chart = instance;
       chartRef.current = instance;
-      instance.setOption(chartOption(points, viewRef.current, rangeRef.current));
+      instance.setOption(chartOption(points, viewRef.current, rangeRef.current, timeRef.current));
       // Al arrancar se ve la grabación entera; después, lo que deje el zoom.
-      const report = () => onWindow(visibleSeconds(instance, span));
+      const report = () => onWindow(visibleRange(instance, span));
       instance.on("dataZoom", report);
       report();
       // También cubre el cambio de tamaño al entrar y salir de pantalla completa.
@@ -338,6 +629,97 @@ function PressureChart({
     rangeRef.current = range;
     chartRef.current?.setOption(chartYPatch(range));
   }, [range]);
+
+  // Ídem con duración/hora real: mismos datos, sólo se reescriben los rótulos.
+  useEffect(() => {
+    timeRef.current = time;
+    chartRef.current?.setOption(chartTimePatch(time));
+  }, [time]);
+
+  // Flechas ←/→ para recorrer el eje X. Sólo a pantalla completa y en PC: es
+  // donde hay teclado y donde la gráfica es lo único en pantalla, así que no le
+  // quita las flechas a nadie (dentro de la página se usan para hacer scroll).
+  //
+  // Mientras la tecla siga abajo se avanza en un bucle de animación, no con el
+  // auto-repeat del sistema: ese va a tirones, empieza tarde y su velocidad la
+  // decide el teclado de cada uno. Aquí es un desplazamiento continuo a una
+  // velocidad que se elige (ver PAN_*).
+  useEffect(() => {
+    if (!fullscreen || compact) return;
+
+    let direction = 0; // -1 izquierda, 0 parado, 1 derecha
+    let fast = false;
+    let frame: number | undefined;
+    let previous = 0;
+
+    // Desplaza una fracción de lo que se ve ahora mismo. En fracción y no en
+    // segundos a propósito: muy alejado se recorre mucho de golpe y muy cerca se
+    // va fino, que es justo lo que se espera de cada uno.
+    const pan = (fraction: number) => {
+      const chart = chartRef.current;
+      if (chart == null) return;
+      const zoom = (chart.getOption() as { dataZoom?: { start?: number; end?: number }[] })
+        .dataZoom?.[0];
+      const start = zoom?.start ?? 0;
+      const end = zoom?.end ?? 100;
+      const width = end - start;
+      if (width >= 100) return; // se ve entera: no hay nada fuera adonde ir
+
+      // Topa contra los extremos en vez de salirse por ellos.
+      const offset = Math.min(100 - end, Math.max(-start, width * fraction));
+      if (offset === 0) return;
+      chart.dispatchAction({ type: "dataZoom", start: start + offset, end: end + offset });
+    };
+
+    const step = (now: number) => {
+      // Con tope: al volver de otra pestaña, `now - previous` son segundos
+      // enteros y sin esto la gráfica pegaría un salto al fondo.
+      const elapsed = Math.min((now - previous) / 1000, 0.05);
+      previous = now;
+      if (direction !== 0) pan(direction * PAN_SPEED * (fast ? PAN_FAST : 1) * elapsed);
+      frame = requestAnimationFrame(step);
+    };
+
+    const stop = () => {
+      direction = 0;
+      if (frame != null) cancelAnimationFrame(frame);
+      frame = undefined;
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const dir = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (dir === 0) return;
+      event.preventDefault();
+      fast = event.shiftKey;
+      if (event.repeat) return; // el bucle ya está corriendo; el repeat del SO sobra
+
+      direction = dir;
+      pan(dir * PAN_TAP); // que un toque corto se note, sin esperar al primer frame
+      if (frame == null) {
+        previous = performance.now();
+        frame = requestAnimationFrame(step);
+      }
+    };
+
+    // Sólo para si lo que se suelta es la tecla que estaba moviendo: con las dos
+    // flechas pulsadas, soltar la contraria no tiene por qué dejarlo clavado.
+    const onKeyUp = (event: KeyboardEvent) => {
+      const dir = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (dir !== 0 && dir === direction) stop();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    // Si se cambia de ventana con la tecla pulsada no llega el keyup y la
+    // gráfica se quedaría desplazándose sola.
+    window.addEventListener("blur", stop);
+    return () => {
+      stop();
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", stop);
+    };
+  }, [fullscreen, compact]);
 
   return (
     <div
@@ -462,6 +844,7 @@ const playbackStyles = {
     color: "#888",
   },
   readoutValue: { fontFamily: MONO, fontSize: 12, fontWeight: 800, color: INK },
+  readoutWide: { minWidth: 186, whiteSpace: "nowrap" as const },
   // Ancho fijo: al cambiar de escalón los botones no se mueven de sitio.
   scaleValue: { minWidth: 72, textAlign: "center" as const },
   stepButton: {
@@ -486,6 +869,30 @@ const playbackStyles = {
   },
   stepButtonHover: { borderColor: ACCENT, boxShadow: `3px 3px 0 ${ACCENT}` },
   stepButtonOff: { opacity: 0.3, cursor: "default" },
+  // Mismo cuerpo que los botones de escala, pero con texto: el activo se rellena
+  // de acento en vez de sólo cambiar de borde, que sin ver los dos a la vez no
+  // se sabría cuál está puesto.
+  modeButton: {
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    background: PAPER,
+    color: INK,
+    borderWidth: 2,
+    borderStyle: "solid" as const,
+    borderColor: INK,
+    boxShadow: `2px 2px 0 ${INK}`,
+    padding: "0 9px",
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 800,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.04em",
+    lineHeight: 1,
+    cursor: "pointer",
+    transition: "box-shadow 0.15s ease, border-color 0.15s ease, background-color 0.15s ease",
+  },
+  modeButtonOn: { background: ACCENT },
   hint: {
     fontFamily: MONO,
     fontSize: 10,
@@ -510,5 +917,124 @@ const playbackStyles = {
     maxWidth: 460,
     lineHeight: 1.6,
     margin: 0,
+  },
+  sectionEmpty: {
+    fontFamily: MONO,
+    fontSize: 12,
+    color: "#666",
+    lineHeight: 1.6,
+    margin: 0,
+    padding: "10px 0",
+  },
+  // --- Gráficos de análisis ---
+  //
+  // Nada de ECharts aquí: son barras, y unas barras son un div con un alto en
+  // porcentaje. Montar dos instancias más de la librería para esto sería pagar
+  // un precio caro por algo que el navegador ya sabe hacer.
+  plots: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+    gap: 28,
+  },
+  plotsCompact: { gridTemplateColumns: "1fr", gap: 22 },
+  plot: { margin: 0, minWidth: 0 },
+  // Envuelve: la leyenda vive aquí dentro, y en una columna estrecha tiene que
+  // poder caer debajo del título en vez de estrujarlo.
+  plotHead: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: 10,
+    flexWrap: "wrap" as const,
+    marginBottom: 12,
+  },
+  plotTitle: {
+    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: 800,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.06em",
+    color: INK,
+  },
+  plotNote: {
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 700,
+    color: "#888",
+  },
+  legend: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    flexWrap: "wrap" as const,
+  },
+  legendItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 700,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+    // El texto va en tinta, nunca en el color de la serie: quien lleva la
+    // identidad es la muestra de color de al lado.
+    color: "#555",
+  },
+  legendSwatch: { width: 12, height: 12, border: `1.5px solid ${INK}`, flexShrink: 0 },
+
+  // Tarta: mismo alto que el histograma para que la fila del grid quede pareja.
+  // El círculo no lo llena del todo — así las cifras respiran a su lado en vez de
+  // quedarse arrinconadas contra el borde de la columna.
+  pieRow: { display: "flex", alignItems: "center", gap: 20, height: 132 },
+  pie: {
+    flexShrink: 0,
+    width: 110,
+    height: 110,
+    borderRadius: "50%",
+    border: `2px solid ${INK}`,
+  },
+  pieKeys: { display: "flex", flexDirection: "column" as const, gap: 16, minWidth: 0 },
+  pieKey: { display: "flex", flexDirection: "column" as const, gap: 3, minWidth: 0 },
+  pieKeyHead: {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 700,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+    color: "#555",
+  },
+  // El sangrado deja la cifra a plomo con el texto de arriba, no con la muestra
+  // de color (12 del cuadrado + 7 del hueco).
+  pieKeyValue: {
+    paddingLeft: 19,
+    fontFamily: MONO,
+    fontSize: 22,
+    fontWeight: 900,
+    lineHeight: 1,
+    color: INK,
+  },
+
+  histogram: {
+    display: "flex",
+    alignItems: "flex-end",
+    gap: 2,
+    height: 132,
+    borderBottom: `2px solid ${INK}`,
+  },
+  bar: { width: "100%", display: "block" },
+  axis: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    marginTop: 7,
+    fontFamily: MONO,
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: "0.04em",
+    color: "#888",
   },
 } satisfies Record<string, React.CSSProperties>;

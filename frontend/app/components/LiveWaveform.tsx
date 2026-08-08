@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { INK, PAPER, ACCENT } from "../theme";
-import { isDeviceOnline, isSample } from "../lib/api";
+import { isDeviceOnline, isDeviceStatus, isSample } from "../lib/api";
 import { useFrontendSocket } from "../lib/useFrontendSocket";
 import { useCompact } from "../lib/useCompact";
 
@@ -17,13 +17,23 @@ export default function LiveWaveform() {
   const compact = useCompact();
 
   const [reportedOnline, setReportedOnline] = useState<boolean | null>(null);
+  // Igual que en /recordings: hay grabación en curso si y solo si el `status`
+  // del aparato trae un rec_uuid. Aquí no se deduce nada de las muestras.
+  const [reportedRecording, setReportedRecording] = useState(false);
   const [latestSample, setLatestSample] = useState({ pressure: 0, temperature: 0 });
   const [receiving, setReceiving] = useState(false);
   const receivingTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleMessage = (data: unknown) => {
     if (isDeviceOnline(data)) {
-      setReportedOnline(data.type === "device_online");
+      const online = data.type === "device_online";
+      setReportedOnline(online);
+      // Desconectada: lo que dijera hace un rato ya no dice nada de ahora.
+      if (!online) setReportedRecording(false);
+      return;
+    }
+    if (isDeviceStatus(data)) {
+      setReportedRecording(data.rec_uuid != null);
       return;
     }
     if (isSample(data)) {
@@ -42,11 +52,15 @@ export default function LiveWaveform() {
     onOpen: () => {
       samplesBuffer.current = [];
       setReceiving(false);
+      // El server manda el status de partida en cuanto acepta el socket; hasta
+      // que llegue, no consta que haya grabación.
+      setReportedRecording(false);
     },
   });
 
   // Sin noticias frescas no queda nada que respalde el "conectada" de antes.
   const deviceOnline = fresh ? reportedOnline : false;
+  const recording = fresh && reportedRecording;
 
   useEffect(() => () => clearTimeout(receivingTimeout.current), []);
 
@@ -132,6 +146,7 @@ export default function LiveWaveform() {
   return (
     <>
       <div style={{ ...styles.statusCorner, ...(compact ? mobile.statusCorner : null) }}>
+        {recording && <RecordingBadge />}
         <ConnectionStatusBadge wsStatus={wsStatus} deviceOnline={deviceOnline} receiving={receiving} />
       </div>
 
@@ -184,6 +199,17 @@ function Metric({
       <div style={{ ...styles.metricValue, ...(compact ? mobile.metricValue : null) }}>
         {value} <span style={styles.metricUnit}>{unit}</span>
       </div>
+    </div>
+  );
+}
+
+// Aviso de que además de mirar la señal se está guardando en la SD. Al lado del
+// badge de conexión, que es donde ya se mira el estado del aparato.
+function RecordingBadge() {
+  return (
+    <div style={{ ...styles.badge, ...styles.recBadge }}>
+      <span style={styles.recDot} />
+      REC
     </div>
   );
 }
@@ -288,6 +314,14 @@ const styles: Record<string, CSSProperties> = {
     height: 8,
     background: INK,
     borderRadius: "50%",
+  },
+  recBadge: { background: "#dc2626", color: "#ffffff", letterSpacing: "0.12em" },
+  recDot: {
+    width: 9,
+    height: 9,
+    borderRadius: "50%",
+    background: "#ffffff",
+    boxShadow: "0 0 0 3px rgba(255,255,255,0.35)",
   },
   metrics: { display: "flex", gap: 10 },
   metricCard: {

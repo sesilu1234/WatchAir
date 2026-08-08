@@ -20,6 +20,7 @@ export type Recording = {
   file_path: string | null;
   duration_seconds: number | null;
   uploaded_at: string | null; // null = la fila existe pero el binario no llegó a Storage
+  name: string | null; // null = sin nombre propio; se deriva del inicio (ver format.ts)
   username: string;
 };
 
@@ -40,6 +41,10 @@ export type DeviceStatusMessage = {
   rec_started_epoch_ms: number | null; // t=0 de la grabación: es lo que le da nombre
   uploading: boolean; // subiendo un fichero ahora mismo
   pending: number; // ficheros en la SD esperando a subir
+  // Lo mide server2 contra el Content-Length del POST, no la ESP32: ella no
+  // puede saber cuánto ha llegado al otro lado. null = no hay cuerpo entrando
+  // (o llegó sin Content-Length), y entonces la barra sale sin número.
+  upload_percent: number | null;
 };
 export type SampleMessage = { t: number; p: number; temp?: number };
 
@@ -122,6 +127,30 @@ export async function listDevices(): Promise<Device[]> {
   if (!res.ok) throw new Error(`/api/devices -> ${res.status}`);
   return res.json();
 }
+
+// --- Escrituras del historial: borrar y renombrar, también por rutas propias ---
+
+async function frontendWrite(path: string, init: RequestInit): Promise<void> {
+  const res = await fetch(path, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.error ?? `${path} -> ${res.status}`);
+  }
+}
+
+// Borra las filas y sus ficheros de Storage. No se puede deshacer.
+export const deleteRecordings = (uuids: string[]) =>
+  frontendWrite("/api/recordings", { method: "DELETE", body: JSON.stringify({ uuids }) });
+
+// `null` o texto en blanco devuelve la grabación a su nombre derivado del inicio.
+export const renameRecording = (uuid: string, name: string | null) =>
+  frontendWrite(`/api/recordings/${encodeURIComponent(uuid)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
 
 // Puntos [segundos, presión|null] ya con la regla de gaps aplicada (null =
 // corte de línea). null en la presión, nunca en el tiempo.

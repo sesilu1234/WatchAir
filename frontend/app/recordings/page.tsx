@@ -3,11 +3,13 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ACCENT, INK, MONO, PAPER } from "../theme";
 import {
+  deleteRecordings,
   isDeviceOnline,
   isDeviceStatus,
   isRecordingFinished,
   listDevices,
   listRecordings,
+  renameRecording,
   startRecording,
   stopRecording,
   type Device,
@@ -17,12 +19,14 @@ import {
 import { useCompact } from "../lib/useCompact";
 import { useFrontendSocket, type WsStatus } from "../lib/useFrontendSocket";
 import {
+  displayName,
   durationSeconds,
   formatClock,
   formatRelativeDate,
   formatTime,
   recordingName,
 } from "../lib/format";
+import DeleteDialog from "./DeleteDialog";
 
 // Nada de deducir estados: lo que hace el aparato sale entero del `status` que
 // manda la ESP32 (cada 2 s y en cuanto algo cambia). Sin conexión con ella no se
@@ -43,6 +47,18 @@ export default function RecordingsPage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [filterDeviceUuid, setFilterDeviceUuid] = useState("");
   const [filterDate, setFilterDate] = useState("");
+
+  // Borrado: `selecting` enseña las casillas, `confirming` son los uuid que ya
+  // están delante del diálogo esperando a que se escriba la frase.
+  const [selecting, setSelecting] = useState(false);
+  const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState<string[] | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Qué fila tiene abiertas sus acciones, y cuál. Vive aquí y no en la fila para
+  // que solo pueda haber una a la vez y para poder cerrarla desde fuera (al
+  // entrar en modo selección, o al borrar).
+  const [rowAction, setRowAction] = useState<{ uuid: string; kind: RowAction } | null>(null);
 
   const refresh = useCallback(() => {
     listRecordings()
@@ -128,6 +144,48 @@ export default function RecordingsPage() {
     [recordings, filterDeviceUuid, filterDate],
   );
 
+  // También al tocar los filtros: si no, quedarían marcadas grabaciones que ya
+  // no se ven y el contador de arriba diría cosas raras.
+  const clearSelection = () => setSelection(new Set());
+
+  const enterSelection = () => {
+    setSelecting(true);
+    setRowAction(null); // marcar casillas y toquetear una fila son cosas distintas
+  };
+
+  const toggleOne = (uuid: string) =>
+    setSelection((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(uuid)) next.add(uuid);
+      return next;
+    });
+
+  const allSelected = history.length > 0 && history.every((r) => selection.has(r.uuid));
+  const toggleAll = () =>
+    setSelection(allSelected ? new Set() : new Set(history.map((r) => r.uuid)));
+
+  const leaveSelection = () => {
+    setSelecting(false);
+    clearSelection();
+  };
+
+  const confirmDelete = async () => {
+    if (confirming == null || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteRecordings(confirming);
+      setConfirming(null);
+      setRowAction(null);
+      leaveSelection();
+      refresh();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <main style={{ ...styles.main, ...(compact ? mobile.main : null) }}>
       <header style={styles.header}>
@@ -153,6 +211,7 @@ export default function RecordingsPage() {
               wsStatus={wsStatus}
               pending={pending}
               uploading={uploading}
+              uploadPercent={status?.upload_percent ?? null}
               pendingUploads={status?.pending ?? 0}
               error={error}
               onStart={() => run(startRecording)}
@@ -168,15 +227,46 @@ export default function RecordingsPage() {
               </span>
               <span style={styles.listTitle}>Historial</span>
             </div>
-            <span style={styles.listCountPill}>{history.length} grabaciones</span>
+            <div style={styles.listActions}>
+              <span style={styles.listCountPill}>
+                {selecting
+                  ? `${selection.size} seleccionadas`
+                  : `${history.length} grabaciones`}
+              </span>
+              {selecting ? (
+                <>
+                  <SmallButton label={allSelected ? "Ninguna" : "Todas"} onClick={toggleAll} />
+                  <SmallButton
+                    label="Borrar"
+                    danger
+                    disabled={selection.size === 0}
+                    onClick={() => {
+                      setDeleteError(null);
+                      setConfirming([...selection]);
+                    }}
+                  />
+                  <SmallButton label="Cancelar" onClick={leaveSelection} />
+                </>
+              ) : (
+                history.length > 0 && (
+                  <SmallButton label="Seleccionar" onClick={enterSelection} />
+                )
+              )}
+            </div>
           </div>
 
           <FilterBar
             devices={devices}
             deviceUuid={filterDeviceUuid}
             date={filterDate}
-            onDeviceChange={setFilterDeviceUuid}
-            onDateChange={setFilterDate}
+            onDeviceChange={(v) => {
+              setFilterDeviceUuid(v);
+              clearSelection();
+            }}
+            onDateChange={(v) => {
+              setFilterDate(v);
+              clearSelection();
+            }}
           />
 
           <div style={styles.tableHead}>
@@ -193,11 +283,40 @@ export default function RecordingsPage() {
                 {recordings.length === 0 ? "Todavía no hay grabaciones." : "Nada con estos filtros."}
               </div>
             ) : (
-              history.map((r) => <RecordingRow key={r.uuid} recording={r} />)
+              history.map((r) => (
+                <RecordingRow
+                  key={r.uuid}
+                  recording={r}
+                  selecting={selecting}
+                  selected={selection.has(r.uuid)}
+                  action={rowAction?.uuid === r.uuid ? rowAction.kind : null}
+                  onAction={(kind) => setRowAction(kind == null ? null : { uuid: r.uuid, kind })}
+                  onToggle={() => toggleOne(r.uuid)}
+                  onDelete={() => {
+                    setDeleteError(null);
+                    setConfirming([r.uuid]);
+                  }}
+                  onRenamed={refresh}
+                />
+              ))
             )}
           </div>
         </div>
       </div>
+
+      {confirming != null && (
+        <DeleteDialog
+          count={confirming.length}
+          pending={deleting}
+          error={deleteError}
+          onConfirm={confirmDelete}
+          onCancel={() => {
+            if (deleting) return;
+            setConfirming(null);
+            setDeleteError(null);
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -260,6 +379,7 @@ function NewRecordingPanel({
   wsStatus,
   pending,
   uploading,
+  uploadPercent,
   pendingUploads,
   error,
   onStart,
@@ -268,6 +388,7 @@ function NewRecordingPanel({
   wsStatus: WsStatus;
   pending: boolean;
   uploading: boolean;
+  uploadPercent: number | null;
   pendingUploads: number;
   error: string | null;
   onStart: () => void;
@@ -281,7 +402,25 @@ function NewRecordingPanel({
 
   return (
     <div style={{ ...styles.idlePanel, ...(compact ? mobile.idlePanel : null) }}>
-      <ConnectionBadge wsStatus={wsStatus} deviceOnline={deviceOnline} />
+      <div style={styles.idleInfo}>
+        <ConnectionBadge wsStatus={wsStatus} deviceOnline={deviceOnline} />
+        {error != null ? (
+          <p style={styles.errorHint}>{error}</p>
+        ) : (
+          <p style={styles.idleHint}>
+            {wsStatus !== "connected"
+              ? "Esperando conexión con el servidor…"
+              : deviceOnline !== true
+                ? "Tu ESP32 no está conectada."
+                : uploading
+                  ? "Subiendo la última grabación…"
+                  : pendingUploads > 0
+                    ? `${pendingUploads} grabación(es) esperando a subirse.`
+                    : "Pulsa para empezar a registrar la señal respiratoria."}
+          </p>
+        )}
+        {uploading && <UploadBar percent={uploadPercent} />}
+      </div>
       <button
         onClick={onStart}
         disabled={disabled}
@@ -300,21 +439,23 @@ function NewRecordingPanel({
         <PlusIcon />
         Nueva Grabación
       </button>
-      {error != null ? (
-        <p style={styles.errorHint}>{error}</p>
-      ) : (
-        <p style={styles.idleHint}>
-          {wsStatus !== "connected"
-            ? "Esperando conexión con el servidor…"
-            : deviceOnline !== true
-              ? "Tu ESP32 no está conectada."
-              : uploading
-                ? "Subiendo la última grabación…"
-                : pendingUploads > 0
-                  ? `${pendingUploads} grabación(es) esperando a subirse.`
-                  : "Pulsa para empezar a registrar la señal respiratoria."}
-        </p>
-      )}
+    </div>
+  );
+}
+
+// Cuánto del fichero ha llegado al server. El número lo mide server2 contra el
+// Content-Length del POST (la ESP32 manda el .bin de una pieza, así que el total
+// se sabe desde el primer byte); aquí solo se pinta.
+//
+// Sin número todavía, la barra sale vacía con "…" en vez de rellenarse sola:
+// una barra que se mueve sin saber nada miente más que no decir nada.
+function UploadBar({ percent }: { percent: number | null }) {
+  return (
+    <div style={styles.uploadBar}>
+      <div style={styles.uploadTrack}>
+        <div style={{ ...styles.uploadFill, width: `${percent ?? 0}%` }} />
+      </div>
+      <span style={styles.uploadPercent}>{percent == null ? "…" : `${percent}%`}</span>
     </div>
   );
 }
@@ -410,11 +551,72 @@ function RecordingNowPanel({
   );
 }
 
-// --- Fila de grabación ---
+// --- Botón pequeño, de la cabecera de la lista y de las filas ---
 
-function RecordingRow({ recording }: { recording: Recording }) {
+function SmallButton({
+  label,
+  onClick,
+  danger = false,
+  disabled = false,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        ...styles.smallButton,
+        ...(danger ? styles.smallButtonDanger : null),
+        opacity: disabled ? 0.35 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// --- Fila de grabación ---
+//
+// Tres estados: en reposo la fila es un enlace a la grabación; con el menú
+// abierto cambia el lado derecho por sus dos acciones; renombrando, el nombre
+// pasa a ser un campo de texto. Las acciones nunca van dentro del enlace (ni
+// menús flotantes, que la lista tiene scroll propio y los recortaría).
+type RowAction = "menu" | "rename";
+
+function RecordingRow({
+  recording,
+  selecting,
+  selected,
+  action,
+  onAction,
+  onToggle,
+  onDelete,
+  onRenamed,
+}: {
+  recording: Recording;
+  selecting: boolean;
+  selected: boolean;
+  action: RowAction | null;
+  onAction: (kind: RowAction | null) => void;
+  onToggle: () => void;
+  onDelete: () => void;
+  onRenamed: () => void;
+}) {
   const compact = useCompact();
   const [hover, setHover] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const menuOpen = !selecting && action === "menu";
+  const renaming = !selecting && action === "rename";
+
   const date = new Date(recording.started_at);
   // Sin uploaded_at la fila existe pero su binario no llegó a Storage: la ESP32
   // lo sigue reintentando, así que se marca en vez de enseñar una duración que
@@ -422,30 +624,137 @@ function RecordingRow({ recording }: { recording: Recording }) {
   const seconds = recording.uploaded_at === null
     ? null
     : durationSeconds(recording.started_at, recording.ended_at);
+  const name = displayName(recording);
+
+  const startRename = () => {
+    setDraft(name);
+    setError(null);
+    onAction("rename");
+  };
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      // En blanco = quitarle el nombre propio y volver al derivado del inicio.
+      await renameRecording(recording.uuid, draft);
+      onAction(null);
+      onRenamed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const label = (
+    <>
+      <span style={styles.rowName}>{name}</span>
+      <span style={{ ...styles.rowMeta, ...(compact ? mobile.rowMeta : null) }}>
+        {recording.username} · {formatRelativeDate(date)} · {formatTime(date)}
+      </span>
+    </>
+  );
 
   return (
-    <Link
-      href={`/recordings/${recording.uuid}`}
+    <div
       style={{
         ...styles.row,
-        background: hover ? "rgba(0,224,168,0.08)" : "transparent",
-        borderLeft: hover ? `2px solid ${ACCENT}` : "2px solid transparent",
+        background: selected
+          ? "rgba(0,224,168,0.16)"
+          : hover && !selecting
+            ? "rgba(0,224,168,0.08)"
+            : "transparent",
+        borderLeft: selected || (hover && !selecting) ? `2px solid ${ACCENT}` : "2px solid transparent",
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <div style={styles.rowIcon}>
-        <WaveIcon />
-      </div>
-      <div style={{ ...styles.rowMain, ...(compact ? mobile.rowMain : null) }}>
-        <span style={styles.rowName}>{recordingName(recording.started_at)}</span>
-        <span style={{ ...styles.rowMeta, ...(compact ? mobile.rowMeta : null) }}>
-          {recording.username} · {formatRelativeDate(date)} · {formatTime(date)}
-        </span>
-      </div>
-      <span style={styles.rowDuration}>{seconds == null ? "Sin subir" : formatClock(seconds)}</span>
-      <ChevronIcon />
-    </Link>
+      {selecting ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-pressed={selected}
+          title="Seleccionar"
+          style={{ ...styles.checkbox, background: selected ? ACCENT : PAPER }}
+        >
+          {selected && <CheckIcon />}
+        </button>
+      ) : (
+        <div style={styles.rowIcon}>
+          <WaveIcon />
+        </div>
+      )}
+
+      {renaming ? (
+        <div style={styles.renameBox}>
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+              if (e.key === "Escape") onAction(null);
+            }}
+            maxLength={80}
+            placeholder={recordingName(recording.started_at)}
+            spellCheck={false}
+            style={styles.renameInput}
+          />
+          {error != null && <span style={styles.rowError}>{error}</span>}
+        </div>
+      ) : selecting ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          style={{ ...styles.rowMain, ...(compact ? mobile.rowMain : null) }}
+        >
+          {label}
+        </button>
+      ) : (
+        <Link
+          href={`/recordings/${recording.uuid}`}
+          style={{ ...styles.rowMain, ...(compact ? mobile.rowMain : null) }}
+        >
+          {label}
+        </Link>
+      )}
+
+      {renaming ? (
+        <>
+          <SmallButton label={saving ? "…" : "Guardar"} onClick={save} disabled={saving} />
+          <SmallButton label="Cancelar" onClick={() => onAction(null)} disabled={saving} />
+        </>
+      ) : (
+        <>
+          <span style={styles.rowDuration}>
+            {seconds == null ? "Sin subir" : formatClock(seconds)}
+          </span>
+          {!selecting &&
+            (menuOpen ? (
+              <>
+                <SmallButton label="Renombrar" onClick={startRename} />
+                <SmallButton label="Borrar" danger onClick={onDelete} />
+                <SmallButton label="✕" onClick={() => onAction(null)} />
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onAction("menu")}
+                  title="Acciones"
+                  aria-label="Acciones de la grabación"
+                  style={styles.rowMenuButton}
+                >
+                  ⋯
+                </button>
+                <ChevronIcon />
+              </>
+            ))}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -502,6 +811,14 @@ function ArchiveIcon() {
   );
 }
 
+function CheckIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+      <path d="M4 12.5l5 5L20 6.5" stroke={INK} strokeWidth="3.5" strokeLinecap="square" strokeLinejoin="miter" />
+    </svg>
+  );
+}
+
 function ChevronIcon() {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
@@ -512,18 +829,22 @@ function ChevronIcon() {
 
 // --- Estilos: brutalista — bordes gruesos, sombra dura, sin curvas ---
 const styles: Record<string, CSSProperties> = {
+  // El scroll vive aquí y no en el contenedor de la app (que está en overflow
+  // hidden para el resto de páginas): así el historial puede crecer por debajo de
+  // la ventana sin tocar el shell ni las demás vistas.
   main: {
     fontFamily: "'Helvetica Neue', Arial, sans-serif",
-    height: "100vh",
+    height: "100%",
     width: "100%",
     boxSizing: "border-box",
-    padding: "28px 48px 40px",
+    padding: "28px 48px 52px",
     background: PAPER,
     color: INK,
     display: "flex",
     flexDirection: "column",
     gap: 18,
-    overflow: "hidden",
+    overflowY: "auto",
+    overflowX: "hidden",
   },
   header: {
     borderBottom: `2px solid ${INK}`,
@@ -546,39 +867,46 @@ const styles: Record<string, CSSProperties> = {
     margin: "4px 0 0 0",
   },
   split: {
-    flex: 1,
-    minHeight: 0,
+    flex: "none",
     display: "flex",
     flexDirection: "column",
     gap: 18,
   },
   topPane: {
-    flex: 1,
-    minHeight: 0,
+    flex: "none",
     display: "flex",
   },
+  // Sin alto fijo: lo que manda ahora es el historial, y crece con las filas que
+  // haya en vez de quedarse en una franja con scroll propio.
   bottomPane: {
     flexShrink: 0,
-    height: 300,
     display: "flex",
     flexDirection: "column",
     background: "#ffffff",
     border: `2px solid ${INK}`,
     boxShadow: `6px 6px 0 ${INK}`,
-    padding: "16px 22px 6px",
+    padding: "18px 24px 10px",
   },
 
-  // idle panel
+  // Panel de arriba: una banda, no media pantalla. Antes se llevaba el hueco
+  // sobrante de la ventana para enseñar un botón centrado.
   idlePanel: {
     flex: 1,
     display: "flex",
-    flexDirection: "column",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 16,
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 20,
     background: "#ffffff",
     border: `3px dashed ${INK}`,
-    padding: 28,
+    padding: "24px 28px",
+  },
+  idleInfo: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 10,
+    minWidth: 0,
   },
   newButton: {
     display: "flex",
@@ -610,7 +938,6 @@ const styles: Record<string, CSSProperties> = {
     margin: 0,
     textTransform: "uppercase",
     letterSpacing: "0.04em",
-    textAlign: "center",
     maxWidth: 420,
   },
   errorInline: {
@@ -638,9 +965,39 @@ const styles: Record<string, CSSProperties> = {
   },
   badgeDot: { width: 8, height: 8, background: INK, borderRadius: "50%" },
 
+  // Barra de subida: se cuela bajo el texto del panel de reposo, sin cambiarle
+  // el alto (la ESP32 no puede grabar mientras sube, así que este panel es el
+  // único sitio donde puede aparecer).
+  uploadBar: {
+    alignSelf: "stretch",
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    minWidth: 240,
+    maxWidth: 420,
+  },
+  uploadTrack: {
+    flex: 1,
+    height: 12,
+    background: PAPER,
+    border: `2px solid ${INK}`,
+    overflow: "hidden",
+  },
+  uploadFill: { height: "100%", background: ACCENT, transition: "width 0.25s ease" },
+  // Ancho mínimo: al pasar de 9% a 10% la barra no da un salto de sitio.
+  uploadPercent: {
+    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: 800,
+    color: INK,
+    minWidth: 38,
+    textAlign: "right",
+  },
+
   // live panel
   livePanel: {
     flex: 1,
+    minWidth: 0,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -724,6 +1081,7 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
   },
   listTitleGroup: { display: "flex", alignItems: "center", gap: 8 },
+  listActions: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   listTitleIcon: {
     display: "flex",
     alignItems: "center",
@@ -810,9 +1168,11 @@ const styles: Record<string, CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.06em",
   },
+  // Crece con las filas, con un tope generoso para que un historial largo no
+  // convierta la página en un kilómetro de scroll.
   rows: {
-    flex: 1,
-    minHeight: 0,
+    flex: "none",
+    maxHeight: 560,
     overflowY: "auto",
     display: "flex",
     flexDirection: "column",
@@ -820,10 +1180,9 @@ const styles: Record<string, CSSProperties> = {
   row: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
-    padding: "9px 6px 9px 4px",
+    gap: 12,
+    padding: "13px 6px 13px 4px",
     borderBottom: "1px solid rgba(17,17,17,0.08)",
-    textDecoration: "none",
     color: INK,
     transition: "background-color 0.12s ease, border-color 0.12s ease",
   },
@@ -838,7 +1197,23 @@ const styles: Record<string, CSSProperties> = {
     background: PAPER,
     border: "1px solid rgba(17,17,17,0.16)",
   },
-  rowMain: { display: "flex", flexDirection: "row", alignItems: "baseline", gap: 8, minWidth: 0, flex: 1 },
+  // Vale igual para el <Link> de reposo y para el <button> del modo selección:
+  // las dos variantes son la misma fila, solo cambia adónde lleva el clic.
+  rowMain: {
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 8,
+    minWidth: 0,
+    flex: 1,
+    background: "transparent",
+    border: "none",
+    padding: 0,
+    textAlign: "left",
+    textDecoration: "none",
+    color: INK,
+    cursor: "pointer",
+  },
   rowName: {
     fontFamily: MONO,
     fontSize: 11.5,
@@ -866,6 +1241,64 @@ const styles: Record<string, CSSProperties> = {
     padding: "3px 10px",
     flexShrink: 0,
   },
+
+  // --- Selección, renombrado y borrado ---
+  smallButton: {
+    flexShrink: 0,
+    fontFamily: MONO,
+    fontSize: 10,
+    fontWeight: 800,
+    color: INK,
+    background: PAPER,
+    border: `1.5px solid ${INK}`,
+    padding: "5px 10px",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    cursor: "pointer",
+  },
+  smallButtonDanger: { background: "#dc2626", color: "#fff" },
+  checkbox: {
+    flexShrink: 0,
+    width: 26,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    border: `2px solid ${INK}`,
+    padding: 0,
+    cursor: "pointer",
+  },
+  renameBox: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 },
+  renameInput: {
+    width: "100%",
+    boxSizing: "border-box",
+    fontFamily: MONO,
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: INK,
+    background: "#ffffff",
+    border: `2px solid ${INK}`,
+    padding: "5px 8px",
+  },
+  rowError: { fontFamily: MONO, fontSize: 10, fontWeight: 700, color: "#dc2626" },
+  rowMenuButton: {
+    flexShrink: 0,
+    width: 26,
+    height: 26,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "transparent",
+    border: "1px solid rgba(17,17,17,0.16)",
+    padding: 0,
+    fontFamily: MONO,
+    fontSize: 14,
+    fontWeight: 900,
+    lineHeight: 1,
+    color: "#666",
+    cursor: "pointer",
+  },
+
   empty: {
     flex: 1,
     display: "flex",
@@ -893,25 +1326,26 @@ const styles: Record<string, CSSProperties> = {
 // --- Móvil: nada de alturas fijas ni de dos paneles repartiéndose la pantalla;
 // la página entera hace scroll y el historial crece hacia abajo. ---
 const mobile: Record<string, CSSProperties> = {
+  // Aquí el scroll lo hace el contenedor de la app (ver globals.css), así que la
+  // página vuelve a crecer con su contenido y no se desplaza por dentro.
   main: {
     height: "auto",
     minHeight: "100%",
-    overflow: "visible",
+    overflowY: "visible",
+    overflowX: "visible",
     padding: "16px 14px 22px",
     gap: 14,
   },
   title: { fontSize: 20 },
-  split: { flex: "none", gap: 14 },
-  topPane: { flex: "none" },
+  split: { gap: 14 },
   bottomPane: {
-    height: "auto",
     boxShadow: `4px 4px 0 ${INK}`,
     padding: "14px 14px 4px",
   },
-  rows: { flex: "none", overflowY: "visible" },
+  rows: { maxHeight: "none", overflowY: "visible" },
 
-  idlePanel: { padding: "26px 16px", gap: 14 },
-  newButton: { padding: "14px 20px", fontSize: 13, textAlign: "center" },
+  idlePanel: { flexDirection: "column", alignItems: "stretch", padding: "18px 16px", gap: 14 },
+  newButton: { padding: "14px 20px", fontSize: 13, justifyContent: "center" },
 
   livePanel: { padding: "18px 16px", gap: 16, boxShadow: `5px 5px 0 ${INK}` },
   liveMetric: { flex: "1 1 130px", padding: "8px 12px" },

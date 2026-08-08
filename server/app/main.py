@@ -158,26 +158,44 @@ async def device_upload(uuid: str, secret: str, recording: str, request: Request
     if not _device_authorized(uuid, secret):
         raise HTTPException(status_code=403, detail="Credenciales de dispositivo inválidas")
 
-    # Se acumula con tope en vez de request.body(): un Content-Length mentido no
-    # puede hacer crecer esto sin limite.
-    data = bytearray()
-    async for chunk in request.stream():
-        data.extend(chunk)
-        if len(data) > config.MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Grabación demasiado grande")
-    if not data:
-        raise HTTPException(status_code=400, detail="Cuerpo vacío")
+    # La ESP32 manda el fichero de una pieza, asi que el total se sabe desde el
+    # primer byte: el porcentaje es real, no una estimacion. Sin Content-Length
+    # (o con uno ilegible) `total` es 0 y la subida va igual, solo que sin
+    # porcentaje: esto no puede ser nunca el motivo de que un upload falle.
+    try:
+        total = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        total = 0
+    dev = hub.devices.get(uuid)
 
     try:
-        await recordings.complete_upload(uuid, recording, bytes(data))
-    except recordings.BadRecording as exc:
-        # Reintentar no lo va a arreglar, pero tampoco se borra nada: el fichero
-        # se queda en la SD por si se puede rescatar a mano.
-        log.error("Upload %s: fichero ilegible (%s)", recording, exc)
-        raise HTTPException(status_code=400, detail=f"{exc}"[:200]) from exc
-    except Exception as exc:
-        log.exception("Upload %s: no se pudo persistir", recording)
-        raise HTTPException(status_code=503, detail=f"{exc}"[:200]) from exc
+        # Se acumula con tope en vez de request.body(): un Content-Length mentido
+        # no puede hacer crecer esto sin limite.
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > config.MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Grabación demasiado grande")
+            await recordings.on_upload_progress(dev, len(data), total)
+        if not data:
+            raise HTTPException(status_code=400, detail="Cuerpo vacío")
+
+        try:
+            # El 100% se queda puesto mientras esto persiste en Supabase: los
+            # bytes ya han llegado, pero la subida no ha terminado hasta el 200.
+            await recordings.complete_upload(uuid, recording, bytes(data))
+        except recordings.BadRecording as exc:
+            # Reintentar no lo va a arreglar, pero tampoco se borra nada: el
+            # fichero se queda en la SD por si se puede rescatar a mano.
+            log.error("Upload %s: fichero ilegible (%s)", recording, exc)
+            raise HTTPException(status_code=400, detail=f"{exc}"[:200]) from exc
+        except Exception as exc:
+            log.exception("Upload %s: no se pudo persistir", recording)
+            raise HTTPException(status_code=503, detail=f"{exc}"[:200]) from exc
+    finally:
+        # Tambien si se corto a medias: si no, la barra se quedaria clavada en el
+        # porcentaje al que murio hasta la siguiente subida.
+        await recordings.clear_upload_progress(dev)
     return {"ok": True}
 
 

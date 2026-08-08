@@ -27,6 +27,11 @@ def device_status(dev: hub.Device) -> dict:
         "rec_started_epoch_ms": dev.rec_started_epoch_ms,
         "uploading": dev.uploading,
         "pending": dev.pending,
+        # Lo pone el server, no la ESP32 (ver on_upload_progress). None = no hay
+        # cuerpo entrando, o llego sin Content-Length y no hay total con el que
+        # comparar: en ese caso el frontend enseña la barra sin numero en vez de
+        # inventarse uno.
+        "upload_percent": dev.upload_percent,
     }
 
 
@@ -56,6 +61,34 @@ def on_nack(dev: hub.Device, data: dict):
     grabando…). El motivo sube tal cual al browser."""
     if dev.ack is not None and not dev.ack.done() and data.get("uuid") == dev.ack_target:
         dev.ack.set_result((False, data.get("reason") or ""))
+
+
+async def on_upload_progress(dev: hub.Device | None, received: int, total: int):
+    """Cuanto del .bin lleva entrado, contra el Content-Length del POST.
+
+    Solo se avisa al browser cuando cambia el entero: un fichero de varios MB
+    llega en cientos de trozos y no hace falta un mensaje por cada uno. Con eso
+    la subida entera cuesta 100 mensajes como mucho, pase lo que pase.
+
+    `dev` puede ser None si la ESP32 subio el fichero con su WS caido: entonces
+    no hay estado que reflejar y la subida sigue igual, solo que sin barrita.
+    """
+    if dev is None or total <= 0:
+        return
+    percent = min(100, received * 100 // total)
+    if percent == dev.upload_percent:
+        return
+    dev.upload_percent = percent
+    await hub.notify(dev.uuid, device_status(dev))
+
+
+async def clear_upload_progress(dev: hub.Device | None):
+    """Se llama pase lo que pase al acabar el POST (bien, mal o a medias): la
+    barra no puede quedarse clavada porque la subida se cortara."""
+    if dev is None or dev.upload_percent is None:
+        return
+    dev.upload_percent = None
+    await hub.notify(dev.uuid, device_status(dev))
 
 
 # --- control desde el navegador ---------------------------------------------

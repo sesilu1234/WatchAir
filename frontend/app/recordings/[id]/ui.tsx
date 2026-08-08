@@ -63,18 +63,22 @@ export function Notice({
 
 // --- Estilos: brutalista — bordes gruesos, sombra dura, sin curvas ---
 export const styles: Record<string, CSSProperties> = {
+  // El scroll vive aquí y no en el contenedor de la app (que está en overflow
+  // hidden para el resto de páginas): así esta página puede crecer por debajo de
+  // la ventana sin tocar el shell ni las demás vistas.
   main: {
     fontFamily: "'Helvetica Neue', Arial, sans-serif",
-    height: "100vh",
+    height: "100%",
     width: "100%",
     boxSizing: "border-box",
-    padding: "28px 48px 40px",
+    padding: "28px 48px 52px",
     background: PAPER,
     color: INK,
     display: "flex",
     flexDirection: "column",
-    gap: 14,
-    overflow: "hidden",
+    gap: 18,
+    overflowY: "auto",
+    overflowX: "hidden",
     position: "relative",
   },
   topBack: {
@@ -91,9 +95,16 @@ export const styles: Record<string, CSSProperties> = {
     textDecoration: "none",
     flexShrink: 0,
   },
+  // El título manda a la izquierda y la acción de la página cae a la derecha, en
+  // vez de colgar del final de la barra de métricas.
   header: {
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 16,
+    flexWrap: "wrap",
     borderBottom: `2px solid ${INK}`,
-    paddingBottom: 14,
+    paddingBottom: 16,
     flexShrink: 0,
   },
   title: {
@@ -112,22 +123,20 @@ export const styles: Record<string, CSSProperties> = {
     margin: "4px 0 0 0",
   },
 
-  // barra de métricas
+  // Barra de métricas: una tarjeta por dato en vez de una tira con separadores
+  // de un píxel. Ocupan lo mismo de alto y se leen de un vistazo.
   bar: {
     flexShrink: 0,
-    display: "flex",
-    alignItems: "center",
-    gap: 14,
-    flexWrap: "wrap",
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+    gap: 12,
+  },
+  stat: {
+    minWidth: 0,
     background: "#ffffff",
     border: `2px solid ${INK}`,
     boxShadow: `4px 4px 0 ${INK}`,
-    padding: "14px 18px",
-  },
-  stat: {
-    flex: "0 0 auto",
-    paddingRight: 14,
-    borderRight: "1px solid rgba(17,17,17,0.16)",
+    padding: "13px 16px",
   },
   statLabel: {
     fontFamily: MONO,
@@ -139,10 +148,11 @@ export const styles: Record<string, CSSProperties> = {
   },
   statValue: { fontSize: 20, fontWeight: 900, marginTop: 4, fontFamily: MONO },
 
-  // tarjeta que contiene la gráfica
+  // Tarjeta de la gráfica. Alto propio y no `flex: 1`: la página ya no está
+  // encajada en la ventana, así que no hay hueco sobrante que repartir.
   card: {
-    flex: 1,
-    minHeight: 0,
+    flex: "none",
+    height: "clamp(380px, 56vh, 620px)",
     background: "#ffffff",
     border: `3px solid ${INK}`,
     boxShadow: `8px 8px 0 ${INK}`,
@@ -188,6 +198,43 @@ export const styles: Record<string, CSSProperties> = {
   buttonStop: { marginLeft: "auto", background: "#dc2626", color: "#fff", fontSize: 13, fontWeight: 900 },
   buttonAccent: { background: ACCENT },
 
+  // Sección de análisis, debajo de la gráfica. Sin caja: ni borde, ni sombra, ni
+  // fondo propio. Lo único que la separa es la línea del título, igual que la
+  // cabecera de la página — meterla en un marco la dejaba sin aire.
+  // El margen de arriba es generoso a propósito: pegada a la gráfica, esta
+  // sección se leía como parte de ella en vez de como un bloque aparte.
+  section: {
+    flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: 28,
+    marginTop: 38,
+  },
+  sectionHead: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap",
+    borderBottom: `2px solid ${INK}`,
+    paddingBottom: 14,
+  },
+  sectionTitle: {
+    fontFamily: MONO,
+    fontSize: 13,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+  },
+  sectionNote: {
+    fontFamily: MONO,
+    fontSize: 10,
+    color: "#888",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    margin: 0,
+  },
+
   // avisos a pantalla completa
   notice: {
     flex: 1,
@@ -232,32 +279,29 @@ export const styles: Record<string, CSSProperties> = {
 // --- Móvil: mismas piezas, sin alturas fijas y con la barra de métricas en
 // dos columnas. Lo comparten la vista en vivo y la de reproducción. ---
 export const mobile: Record<string, CSSProperties> = {
+  // Aquí el scroll lo hace el contenedor de la app (ver globals.css), así que la
+  // página vuelve a crecer con su contenido y no se desplaza por dentro.
   main: {
     height: "auto",
     minHeight: "100%",
-    overflow: "visible",
+    overflowY: "visible",
+    overflowX: "visible",
     padding: "14px 14px 22px",
-    gap: 12,
+    gap: 14,
   },
-  header: { paddingRight: 0, paddingBottom: 10 },
+  header: { flexDirection: "column", alignItems: "stretch", gap: 12, paddingBottom: 12 },
   title: { fontSize: 20 },
-  bar: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 10,
-    padding: "12px 14px",
-  },
-  stat: { paddingRight: 0, borderRight: "none", minWidth: 0 },
+  bar: { gridTemplateColumns: "1fr 1fr", gap: 10 },
+  stat: { padding: "10px 12px", boxShadow: `3px 3px 0 ${INK}` },
   statValue: { fontSize: 16, overflowWrap: "anywhere" },
   card: {
-    flex: "none",
+    height: "auto",
     padding: 14,
     gap: 10,
     boxShadow: `5px 5px 0 ${INK}`,
   },
   cardHeader: { gap: 8 },
-  // Ocupa las dos columnas de la barra de métricas.
-  wide: { gridColumn: "1 / -1" },
+  section: { gap: 22, marginTop: 22 },
   // Ancho completo y centrado: en el móvil los botones se pulsan, no se apuntan.
-  button: { gridColumn: "1 / -1", marginLeft: 0, justifyContent: "center" },
+  button: { marginLeft: 0, justifyContent: "center" },
 };

@@ -10,10 +10,35 @@ export type Points = [number, number | null][];
 // pantalla completa.
 export type ChartView = { compact: boolean; fullscreen: boolean };
 
+// --- Rótulos del eje X ---
+//
+// Los datos siempre son segundos desde la primera muestra; lo único que cambia
+// es cómo se escriben. En "clock" se le suma el inicio de la grabación, así que
+// el minuto 20 de una que empezó a las 22:00 se lee 22:20.
+export type TimeMode = "elapsed" | "clock";
+export type TimeAxis = { mode: TimeMode; startedMs: number };
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
 // mm:ss — el eje X son segundos desde la primera muestra
-export function axisTime(seconds: number): string {
+function axisTime(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+}
+
+// El rótulo corto, el de las marcas del eje y del slider.
+export function timeLabel(seconds: number, { mode, startedMs }: TimeAxis): string {
+  if (mode === "elapsed") return axisTime(seconds);
+  const d = new Date(startedMs + seconds * 1000);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// El del tooltip, que sí necesita el segundo: apuntando a un punto concreto,
+// "22:20" a secas sería el mismo rótulo durante un minuto entero.
+function tooltipTime(seconds: number, time: TimeAxis): string {
+  if (time.mode === "elapsed") return `t = ${axisTime(seconds)}`;
+  const d = new Date(time.startedMs + seconds * 1000);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
 // --- Rango del eje Y ---
@@ -63,18 +88,33 @@ export function formatRange(range: number): string {
   return `±${formatNumber(range, decimalsFor(range))} Pa`;
 }
 
-// Cuánto tiempo se está viendo ahora mismo, en segundos. El dataZoom trabaja en
-// porcentaje sobre el tramo completo de la grabación.
-export function visibleSeconds(chart: ECharts, span: number): number {
+// Qué tramo se está viendo ahora mismo, en segundos desde el principio. El
+// dataZoom trabaja en porcentaje sobre la grabación entera.
+export type VisibleRange = { from: number; to: number };
+
+export function visibleRange(chart: ECharts, span: number): VisibleRange {
   const option = chart.getOption() as { dataZoom?: { start?: number; end?: number }[] };
   const zoom = option.dataZoom?.[0];
-  return (((zoom?.end ?? 100) - (zoom?.start ?? 0)) / 100) * span;
+  return {
+    from: ((zoom?.start ?? 0) / 100) * span,
+    to: ((zoom?.end ?? 100) / 100) * span,
+  };
 }
 
-// "45 s" / "2,5 min" — el rótulo de ventana visible.
+// "45 s" / "2,5 min" — cuánto se abarca.
 export function formatWindow(seconds: number): string {
   if (seconds < 60) return `${formatNumber(Math.max(0, seconds), 0)} s`;
   return `${formatNumber(seconds / 60, 1)} min`;
+}
+
+// "22:14 → 22:19 · 4,7 min" — dónde estás, no sólo cuánto ves. Con una señal que
+// se repite casi igual de un tramo a otro, esto es lo único que dice sin lugar a
+// dudas si te has movido y hacia dónde.
+export function formatVisible(range: VisibleRange, time: TimeAxis): string {
+  return (
+    `${timeLabel(range.from, time)} → ${timeLabel(range.to, time)}` +
+    ` · ${formatWindow(range.to - range.from)}`
+  );
 }
 
 // Cuatro divisiones: -n, -n/2, 0, n/2, n. Siempre las mismas, caiga donde caiga
@@ -132,9 +172,40 @@ export function chartYPatch(range: number): EChartsOption {
   return { yAxis: yAxisFor(range) };
 }
 
+// Cambiar de duración a hora real es sólo reescribir rótulos: mismos datos,
+// mismo zoom, misma serie. Por eso va como parche y no repintando la gráfica.
+export function chartTimePatch(time: TimeAxis): EChartsOption {
+  return {
+    xAxis: xAxisLabelsFor(time),
+    tooltip: { formatter: tooltipFormatter(time) },
+    dataZoom: [{ type: "inside" }, { type: "slider", labelFormatter: (v: number) => timeLabel(v, time) }],
+  };
+}
+
+const xAxisLabelsFor = (time: TimeAxis) => ({
+  name: time.mode === "clock" ? "HORA" : "TIEMPO",
+  axisLabel: { formatter: (v: number) => timeLabel(v, time), fontSize: 10, color: "#666" },
+});
+
+const tooltipFormatter = (time: TimeAxis) => (params: unknown) => {
+  const first = Array.isArray(params) ? params[0] : params;
+  const [t, p] = (first as { value: [number, number | null] }).value;
+  // el valor manda, la etiqueta acompaña; en un hueco no hay presión que mostrar
+  const value = p === null ? "—" : `${p.toFixed(2)} Pa`;
+  return (
+    `<div style="font-weight:900;font-size:15px">${value}</div>` +
+    `<div style="color:#666;font-size:11px;margin-top:2px">${tooltipTime(t, time)}</div>`
+  );
+};
+
 // Serie única: la línea de tinta es la marca, el acento sólo rellena el área.
 // Sin leyenda (el título nombra la serie), rejilla en hairline y crosshair+tooltip.
-export function chartOption(points: Points, view: ChartView, range: number): EChartsOption {
+export function chartOption(
+  points: Points,
+  view: ChartView,
+  range: number,
+  time: TimeAxis,
+): EChartsOption {
   const lastT = points[points.length - 1][0];
 
   return {
@@ -152,22 +223,13 @@ export function chartOption(points: Points, view: ChartView, range: number): ECh
       borderRadius: 0,
       padding: [8, 12],
       textStyle: { fontFamily: MONO, color: INK, fontSize: 12 },
-      formatter: (params) => {
-        const first = Array.isArray(params) ? params[0] : params;
-        const [t, p] = first.value as [number, number | null];
-        // el valor manda, la etiqueta acompaña; en un hueco no hay presión que mostrar
-        const value = p === null ? "—" : `${p.toFixed(2)} Pa`;
-        return (
-          `<div style="font-weight:900;font-size:15px">${value}</div>` +
-          `<div style="color:#666;font-size:11px;margin-top:2px">t = ${axisTime(t)}</div>`
-        );
-      },
+      formatter: tooltipFormatter(time),
     },
     xAxis: {
       type: "value",
       min: 0,
       max: lastT,
-      name: "TIEMPO",
+      ...xAxisLabelsFor(time),
       nameLocation: "end",
       nameGap: 10,
       nameTextStyle: { fontSize: 9, color: "#888", fontWeight: "bold" },
@@ -175,8 +237,16 @@ export function chartOption(points: Points, view: ChartView, range: number): ECh
       // atravesando la onda por la mitad. El cero lo marca el markLine hairline.
       axisLine: { onZero: false, lineStyle: { color: INK, width: 2 } },
       axisTick: { lineStyle: { color: INK } },
-      axisLabel: { formatter: (v: number) => axisTime(v), fontSize: 10, color: "#666" },
       splitLine: { lineStyle: { color: "rgba(17,17,17,0.07)", width: 1 } },
+      // Bandas alternas entre marca y marca. Es lo que hace que desplazarse se
+      // note: la respiración se repite casi igual de un ciclo a otro, pero las
+      // bandas no se alinean con ella, así que verlas pasar dice que te mueves y
+      // cuánto. Las calcula ECharts con las mismas divisiones que las etiquetas
+      // del eje, así que se adaptan solas al zoom sin generar nada.
+      splitArea: {
+        show: true,
+        areaStyle: { color: ["rgba(17,17,17,0.045)", "transparent"] },
+      },
     },
     yAxis: {
       type: "value",
@@ -203,7 +273,7 @@ export function chartOption(points: Points, view: ChartView, range: number): ECh
           lineStyle: { color: INK, width: 1 },
           areaStyle: { color: "rgba(0,224,168,0.35)" },
         },
-        labelFormatter: (v: number) => axisTime(v),
+        labelFormatter: (v: number) => timeLabel(v, time),
         textStyle: { fontFamily: MONO, fontSize: 9, color: "#666" },
       },
     ],

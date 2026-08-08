@@ -28,6 +28,12 @@ class Device:
         self.uploading = False
         self.pending = 0
 
+        # Lo unico del estado que NO sale del `status` de la ESP32, porque ella
+        # no puede saberlo: cuanto del fichero ha llegado ya. Lo cuenta el
+        # handler del POST (ver main.device_upload) contra el Content-Length.
+        # None = no hay ningun cuerpo entrando ahora mismo.
+        self.upload_percent: int | None = None
+
         # Un comando (start o stop) en vuelo. Lo resuelve el `status` que
         # confirma el cambio, o un `nack` si la ESP32 no pudo.
         self.ack: asyncio.Future | None = None
