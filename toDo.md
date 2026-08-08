@@ -21,3 +21,14 @@ Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante 
 - que si estas en pantalla grande grafica en pc puedes moverte de izquierda a derecha con arrows keys
 
 - check que te permita ver por hora, o por tiempo en la grabacion
+
+
+-Percentage uploaded, desde server
+
+[18:31, 07/08/2026] ulisesplarocher: Que te sale recording si estas recording tambien en live view
+[18:31, 07/08/2026] ulisesplarocher: Poder cambiar nombre de grabacions
+
+
+
+
+
