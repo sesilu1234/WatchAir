@@ -17,7 +17,7 @@ Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante 
 
 
 
-
+-no se ve barra de abajo de timeline ahora 
 
 
 -- mm UI empieza a ir un poco lento, en especial la grafica
@@ -34,3 +34,9 @@ Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante 
 
 
 
+
+
+-ver que algoritmos , comparativas, illneses, leer papaers, metricas, ver de manera bastante clara y certera cuando hay algo raro, ver las ocndiciones/illneses mas comunes y otras menos y tenerlas en cuenta
+
+
+-ver si se esta midiendo bien, y si la forma de la curva es certera y real y se pinta bien (no desplaza ni traspone puntos), si esta bien los hz, si la forma y tanto pico es normal, etc
