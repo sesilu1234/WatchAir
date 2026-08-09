@@ -26,17 +26,32 @@ Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante 
 - cambiar hz de muestreo  ? HZ 
 
 
-- ver si se puede hacer al mover con arrows keys mas smooth y sin lag. y ademas up y down sirvan para controlar el intervalo de tiempo que se vé tambien.
-
-
-
 - al cargar /recordings, que no aparezca "sin recordings"  sino algo estilo fetching recordings
-
-
-
 
 
 -ver que algoritmos , comparativas, illneses, leer papaers, metricas, ver de manera bastante clara y certera cuando hay algo raro, ver las ocndiciones/illneses mas comunes y otras menos y tenerlas en cuenta
 
 
 -ver si se esta midiendo bien, y si la forma de la curva es certera y real y se pinta bien (no desplaza ni traspone puntos), si esta bien los hz, si la forma y tanto pico es normal, etc
+
+
+
+-Those are credentials/tokens. Since they've now been exposed in this conversation/log excerpt, rotate the device secret and invalidate/rotate the JWT signing secret if these are real production credentials.
+
+Especially the device secret: it's directly appearing in your HTTP query string, which also means it can end up in access logs.
+
+For the application itself, I'd eventually change:
+
+POST /device/upload?uuid=...&secret=...&recording=...
+
+to an authentication header, e.g.:
+
+Authorization: Bearer <device-token>
+
+
+----
+
+
+
+
+---

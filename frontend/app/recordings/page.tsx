@@ -27,6 +27,7 @@ import {
   recordingName,
 } from "../lib/format";
 import DeleteDialog from "./DeleteDialog";
+import FilterBar from "./Filters";
 
 // Nada de deducir estados: lo que hace el aparato sale entero del `status` que
 // manda la ESP32 (cada 2 s y en cuanto algo cambia). Sin conexión con ella no se
@@ -136,12 +137,21 @@ export default function RecordingsPage() {
     }
   };
 
+  const byDevice = useMemo(
+    () => recordings.filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid),
+    [recordings, filterDeviceUuid],
+  );
+
   const history = useMemo(
-    () =>
-      recordings
-        .filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid)
-        .filter((r) => !filterDate || r.started_at.slice(0, 10) === filterDate),
-    [recordings, filterDeviceUuid, filterDate],
+    () => byDevice.filter((r) => !filterDate || r.started_at.slice(0, 10) === filterDate),
+    [byDevice, filterDate],
+  );
+
+  // Los días que el calendario marca con un punto. Van del filtro de usuario,
+  // no del total: con un usuario elegido, marcar días suyos y de otros mentiría.
+  const availableDates = useMemo(
+    () => new Set(byDevice.map((r) => r.started_at.slice(0, 10))),
+    [byDevice],
   );
 
   // También al tocar los filtros: si no, quedarían marcadas grabaciones que ya
@@ -259,6 +269,7 @@ export default function RecordingsPage() {
             devices={devices}
             deviceUuid={filterDeviceUuid}
             date={filterDate}
+            availableDates={availableDates}
             onDeviceChange={(v) => {
               setFilterDeviceUuid(v);
               clearSelection();
@@ -318,57 +329,6 @@ export default function RecordingsPage() {
         />
       )}
     </main>
-  );
-}
-
-// --- Filtro por usuario y fecha ---
-
-function FilterBar({
-  devices,
-  deviceUuid,
-  date,
-  onDeviceChange,
-  onDateChange,
-}: {
-  devices: Device[];
-  deviceUuid: string;
-  date: string;
-  onDeviceChange: (v: string) => void;
-  onDateChange: (v: string) => void;
-}) {
-  return (
-    <div style={styles.filterBar}>
-      <select
-        value={deviceUuid}
-        onChange={(e) => onDeviceChange(e.target.value)}
-        style={styles.filterSelect}
-      >
-        <option value="">Todos los usuarios</option>
-        {devices.map((d) => (
-          <option key={d.uuid} value={d.uuid}>
-            {d.username}
-          </option>
-        ))}
-      </select>
-      <input
-        type="date"
-        value={date}
-        onChange={(e) => onDateChange(e.target.value)}
-        style={styles.filterSelect}
-      />
-      {(deviceUuid || date) && (
-        <button
-          type="button"
-          onClick={() => {
-            onDeviceChange("");
-            onDateChange("");
-          }}
-          style={styles.filterClear}
-        >
-          Limpiar
-        </button>
-      )}
-    </div>
   );
 }
 
@@ -1109,37 +1069,6 @@ const styles: Record<string, CSSProperties> = {
     padding: "3px 10px",
     textTransform: "uppercase",
     letterSpacing: "0.04em",
-  },
-  filterBar: {
-    display: "flex",
-    gap: 8,
-    marginBottom: 10,
-    flexShrink: 0,
-    flexWrap: "wrap",
-  },
-  filterSelect: {
-    fontFamily: MONO,
-    fontSize: 11,
-    fontWeight: 700,
-    color: INK,
-    background: PAPER,
-    border: `1.5px solid ${INK}`,
-    borderRadius: 10,
-    padding: "6px 12px",
-    textTransform: "uppercase",
-    cursor: "pointer",
-  },
-  filterClear: {
-    fontFamily: MONO,
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#888",
-    background: "transparent",
-    border: "1px solid rgba(17,17,17,0.2)",
-    borderRadius: 10, // mismo radio que los selects: la fila se lee como una sola pieza
-    padding: "6px 12px",
-    textTransform: "uppercase",
-    cursor: "pointer",
   },
   tableHead: {
     display: "flex",
