@@ -1,4 +1,4 @@
-import type { Points } from "./chartOption";
+import type { Points } from "./chart";
 
 // Métricas de la respiración sacadas de la propia señal: en el fichero no hay
 // nada de esto, todo sale de contar cuándo la presión cruza el cero. Se calcula
