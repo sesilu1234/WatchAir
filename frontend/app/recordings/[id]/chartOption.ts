@@ -1,4 +1,4 @@
-import type { ECharts, EChartsOption } from "echarts";
+import type { EChartsOption } from "echarts";
 import { formatNumber } from "../../lib/format";
 import { ACCENT, INK, MONO, PAPER } from "../../theme";
 
@@ -92,13 +92,31 @@ export function formatRange(range: number): string {
 // dataZoom trabaja en porcentaje sobre la grabación entera.
 export type VisibleRange = { from: number; to: number };
 
-export function visibleRange(chart: ECharts, span: number): VisibleRange {
-  const option = chart.getOption() as { dataZoom?: { start?: number; end?: number }[] };
-  const zoom = option.dataZoom?.[0];
-  return {
-    from: ((zoom?.start ?? 0) / 100) * span,
-    to: ((zoom?.end ?? 100) / 100) * span,
-  };
+// El mismo tramo en el porcentaje que maneja el dataZoom por dentro.
+export type ZoomRange = { start: number; end: number };
+
+export const FULL_ZOOM: ZoomRange = { start: 0, end: 100 };
+
+// El tramo nuevo viene en el propio evento de dataZoom, y viene de dos formas:
+// suelto (el slider y nuestro dispatchAction) o dentro de `batch` (la rueda y el
+// arrastre). Leerlo de aquí y no con chart.getOption() no es un capricho:
+// getOption() devuelve un clon profundo de la opción entera, serie incluida, así
+// que preguntarle la posición en cada frame del desplazamiento con las flechas
+// significa copiar los cientos de miles de puntos de la grabación sesenta veces
+// por segundo.
+export function zoomFromEvent(params: unknown): ZoomRange | null {
+  const payload = params as {
+    start?: number;
+    end?: number;
+    batch?: { start?: number; end?: number }[];
+  } | null;
+  const range = payload?.batch?.[0] ?? payload;
+  if (typeof range?.start !== "number" || typeof range?.end !== "number") return null;
+  return { start: range.start, end: range.end };
+}
+
+export function visibleRange({ start, end }: ZoomRange, span: number): VisibleRange {
+  return { from: (start / 100) * span, to: (end / 100) * span };
 }
 
 // "45 s" / "2,5 min" — cuánto se abarca.

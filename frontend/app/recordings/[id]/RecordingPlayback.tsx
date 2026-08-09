@@ -21,14 +21,17 @@ import {
   defaultRange,
   formatRange,
   formatVisible,
+  FULL_ZOOM,
   rangeIndex,
   visibleRange,
   Y_RANGES,
+  zoomFromEvent,
   type ChartView,
   type Points,
   type TimeAxis,
   type TimeMode,
   type VisibleRange,
+  type ZoomRange,
 } from "./chartOption";
 import {
   analyseBreathing,
@@ -41,12 +44,29 @@ import {
 import { BackLink, Stat, mobile, styles } from "./ui";
 
 // Velocidad del desplazamiento con las flechas, en ventanas visibles por
-// segundo: 0,4 = la pantalla entera tarda dos segundos y medio en pasar. Va en
+// segundo: 0,8 = la pantalla entera tarda segundo y cuarto en pasar. Va en
 // fracción de lo que se ve, así que se siente igual de suave con la grabación
 // entera delante que con diez segundos.
-const PAN_SPEED = 0.4;
+const PAN_SPEED = 0.6;
 const PAN_FAST = 3; // con Shift
 const PAN_TAP = 0.04; // empujón del toque corto, antes de que arranque el bucle
+
+// Tope de lo que se le deja valer a un frame. Está para el caso de volver de
+// otra pestaña: allí no corren los frames, así que al volver `now - previous`
+// son segundos enteros y sin tope la gráfica pegaría un salto hasta el fondo.
+//
+// Generoso a propósito. Con un tope bajo, un frame que tarde más que él avanza
+// sólo lo que marca el tope y no lo que ha tardado de verdad, así que la gráfica
+// se arrastra a cámara lenta justo cuando va apurada — y encima parece que el
+// desplazamiento es lento cuando lo que pasa es que se están perdiendo frames.
+// Un cuarto de segundo de recuperación no se ve; el hueco de una pestaña en
+// segundo plano se mide en segundos y sigue topado.
+const MAX_FRAME = 0.25;
+
+// El rótulo de la ventana se refresca a 10 Hz y no en cada frame: es texto, y
+// pedirle a React que repinte la cabecera sesenta veces por segundo no cambia
+// nada de lo que se lee.
+const READOUT_MS = 100;
 
 // Vista de una grabación ya terminada: no hay tiempo real, se pinta el CSV entero.
 export default function RecordingPlayback({ recording }: { recording: Recording }) {
@@ -583,6 +603,10 @@ function PressureChart({
   const viewRef = useRef<ChartView>({ compact, fullscreen });
   const rangeRef = useRef(range);
   const timeRef = useRef(time);
+  // Dónde está el zoom ahora mismo, en el porcentaje del dataZoom. Lo llevamos
+  // nosotros porque la gráfica sólo sabe decirlo clonando la serie entera (ver
+  // zoomFromEvent): lo escriben el evento de dataZoom y el propio pan().
+  const zoomRef = useRef<ZoomRange>(FULL_ZOOM);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -591,6 +615,7 @@ function PressureChart({
     let chart: ECharts | undefined;
     let observer: ResizeObserver | undefined;
     let disposed = false;
+    let readout: number | undefined;
     const span = points[points.length - 1][0] - points[0][0];
 
     // echarts sólo en el navegador: import dinámico para no cargarlo en el SSR
@@ -599,10 +624,24 @@ function PressureChart({
       const instance = echarts.init(container, undefined, { renderer: "canvas" });
       chart = instance;
       chartRef.current = instance;
+      // La gráfica nace enseñándolo todo, así que el apunte del zoom también.
+      zoomRef.current = FULL_ZOOM;
       instance.setOption(chartOption(points, viewRef.current, rangeRef.current, timeRef.current));
       // Al arrancar se ve la grabación entera; después, lo que deje el zoom.
-      const report = () => onWindow(visibleRange(instance, span));
-      instance.on("dataZoom", report);
+      const report = () => onWindow(visibleRange(zoomRef.current, span));
+      instance.on("dataZoom", (params: unknown) => {
+        const next = zoomFromEvent(params);
+        if (next != null) zoomRef.current = next;
+        // Un solo aviso pendiente cada vez: mientras el zoom se mueva sale uno
+        // cada READOUT_MS, y al parar cae el último con el sitio definitivo, así
+        // que el rótulo nunca se queda un paso atrás.
+        if (readout == null) {
+          readout = window.setTimeout(() => {
+            readout = undefined;
+            report();
+          }, READOUT_MS);
+        }
+      });
       report();
       // También cubre el cambio de tamaño al entrar y salir de pantalla completa.
       observer = new ResizeObserver(() => instance.resize());
@@ -612,6 +651,7 @@ function PressureChart({
     return () => {
       disposed = true;
       chartRef.current = null;
+      if (readout != null) clearTimeout(readout);
       observer?.disconnect();
       chart?.dispose();
     };
@@ -658,23 +698,21 @@ function PressureChart({
     const pan = (fraction: number) => {
       const chart = chartRef.current;
       if (chart == null) return;
-      const zoom = (chart.getOption() as { dataZoom?: { start?: number; end?: number }[] })
-        .dataZoom?.[0];
-      const start = zoom?.start ?? 0;
-      const end = zoom?.end ?? 100;
+      const { start, end } = zoomRef.current;
       const width = end - start;
       if (width >= 100) return; // se ve entera: no hay nada fuera adonde ir
 
       // Topa contra los extremos en vez de salirse por ellos.
       const offset = Math.min(100 - end, Math.max(-start, width * fraction));
       if (offset === 0) return;
+      // Antes de despachar: el apunte lo lleva quien mueve la gráfica, y así el
+      // frame siguiente parte de aquí sin tener que preguntarle nada a nadie.
+      zoomRef.current = { start: start + offset, end: end + offset };
       chart.dispatchAction({ type: "dataZoom", start: start + offset, end: end + offset });
     };
 
     const step = (now: number) => {
-      // Con tope: al volver de otra pestaña, `now - previous` son segundos
-      // enteros y sin esto la gráfica pegaría un salto al fondo.
-      const elapsed = Math.min((now - previous) / 1000, 0.05);
+      const elapsed = Math.min((now - previous) / 1000, MAX_FRAME);
       previous = now;
       if (direction !== 0) pan(direction * PAN_SPEED * (fast ? PAN_FAST : 1) * elapsed);
       frame = requestAnimationFrame(step);
