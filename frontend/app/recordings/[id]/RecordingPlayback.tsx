@@ -282,7 +282,7 @@ function PhaseSplitPlot({ split }: { split: PhaseSplit }) {
   const label = (fraction: number) => `${formatNumber(fraction * 100, 1)} %`;
 
   return (
-    <Plot title="Reparto del tiempo" note="muestra a muestra">
+    <Plot title="Reparto del tiempo" note="">
       <div style={playbackStyles.pieRow}>
         <span
           style={{

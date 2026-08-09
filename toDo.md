@@ -23,4 +23,14 @@ Ver print y logger de subida pa ver...y tambien de realtime, que falla bastante 
 -- mm UI empieza a ir un poco lento, en especial la grafica
 
 
+- cambiar hz de muestreo  ? HZ 
+
+
+- ver si se puede hacer al mover con arrows keys mas smooth y sin lag. y ademas up y down sirvan para controlar el intervalo de tiempo que se vé tambien.
+
+
+
+- al cargar /recordings, que no aparezca "sin recordings"  sino algo estilo fetching recordings
+
+
 
