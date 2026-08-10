@@ -289,14 +289,49 @@ export function mainOpts(opts: {
 //
 // La grabación entera de un vistazo, con el tramo que se está viendo marcado
 // encima. En una grabación de nueve horas es lo único que dice por dónde vas, y
-// se puede pinchar para saltar. Es otra gráfica de uplot, pero sin ejes, sin
-// cursor y sin zoom: se dibuja una vez y ya.
+// la ventana se puede arrastrar y estirar. Es otra gráfica de uplot, pero sin
+// ejes, sin cursor y sin zoom: se dibuja una vez y ya.
+
+// Ancho mínimo con el que se pinta la ventana, en píxeles CSS. Con el zoom muy
+// cerrado el tramo mide menos de un píxel: sin esto no se vería y, sobre todo,
+// no habría nada que agarrar con el ratón.
+export const NAV_MIN_BOX = 8;
+// Margen para coger un borde de la ventana y estirarla.
+export const NAV_EDGE_GRAB = 7;
+
+// El pico de la grabación entera, con un pelo de aire. La tira es un mapa de
+// todo, así que su escala Y no puede ser la que se elige arriba: puesta a
+// ±1000 Pa para mirar un pico, la silueta se aplastaba contra la línea del
+// centro justo en el momento en que más falta hace para orientarse.
+export function peakAmplitude(signal: Signal): number {
+  let peak = 0;
+  for (const p of signal.ys) {
+    if (p !== null && Math.abs(p) > peak) peak = Math.abs(p);
+  }
+  return peak > 0 ? peak * 1.06 : 1;
+}
+
+// Dónde se pinta la ventana, ya con el ancho mínimo aplicado. Lo usa el dibujado
+// y nadie más: el ratón trabaja en valores de tiempo, no en píxeles.
+function boxOf(u: uPlot, window: VisibleRange, ratio: number) {
+  const { left, width: w } = u.bbox;
+  const x0 = Math.max(left, u.valToPos(window.from, "x", true));
+  const x1 = Math.min(left + w, u.valToPos(window.to, "x", true));
+  const min = NAV_MIN_BOX * ratio;
+  if (x1 - x0 >= min) return { a: x0, b: x1 };
+  // Se ensancha alrededor de su centro, sin salirse de la tira.
+  const a = Math.max(left, Math.min((x0 + x1 - min) / 2, left + w - min));
+  return { a, b: a + min };
+}
+
 export function navOpts(opts: {
   width: number;
   height: number;
-  read: () => { range: number; window: VisibleRange };
+  span: VisibleRange;
+  peak: number;
+  read: () => VisibleRange;
 }): uPlot.Options {
-  const { width, height, read } = opts;
+  const { width, height, span, peak, read } = opts;
 
   return {
     width,
@@ -304,11 +339,22 @@ export function navOpts(opts: {
     padding: [2, 0, 2, 0],
     legend: { show: false },
     cursor: { show: false, drag: { x: false, y: false } },
-    scales: { x: { time: false }, y: { auto: false, range: () => [-read().range, read().range] } },
+    scales: {
+      // El rango del eje X va dicho a mano, y no es un adorno: montada así (sin
+      // cursor y sin ejes) uplot dejaba la escala X en null, y con ella todo lo
+      // demás se caía en cadena — `valToPos` devolvía NaN, el canvas ignora los
+      // rectángulos con NaN, y la serie no llegaba a dibujarse. Resultado: una
+      // tira vacía con sólo el marco. Además es lo que se quiere decir: la tira
+      // enseña la grabación entera, siempre, pase lo que pase con el zoom.
+      x: { time: false, range: () => [span.from, span.to] },
+      y: { auto: false, range: () => [-peak, peak] },
+    },
     axes: [{ show: false }, { show: false }],
     series: [
       {},
-      { stroke: "rgba(17,17,17,0.55)", width: 1, fill: "rgba(17,17,17,0.08)", points: { show: false } },
+      // Marcada de verdad: encima va el velo de lo que queda fuera de la
+      // ventana, y con un trazo flojo no sobrevivía a él.
+      { stroke: "rgba(17,17,17,0.7)", width: 1, fill: "rgba(17,17,17,0.14)", points: { show: false } },
     ],
     hooks: {
       draw: [
@@ -316,23 +362,23 @@ export function navOpts(opts: {
           const { ctx } = u;
           const { left, top, width: w, height: h } = u.bbox;
           const ratio = (u.ctx.canvas.width / u.width) || 1;
-          const { from, to } = read().window;
-          const x0 = Math.max(left, u.valToPos(from, "x", true));
-          const x1 = Math.min(left + w, u.valToPos(to, "x", true));
+          const { a, b } = boxOf(u, read(), ratio);
 
           ctx.save();
-          // Fuera del tramo se apaga; dentro se tiñe de acento. Así el trozo que
-          // estás mirando se lee de un golpe de vista sobre la silueta.
-          ctx.fillStyle = "rgba(242,241,236,0.72)";
-          ctx.fillRect(left, top, x0 - left, h);
-          ctx.fillRect(x1, top, left + w - x1, h);
-          ctx.fillStyle = "rgba(0,224,168,0.22)";
-          ctx.fillRect(x0, top, Math.max(x1 - x0, ratio), h);
+          // Lo de fuera se atenúa, no se borra: es el mapa de la grabación
+          // entera y tiene que seguir leyéndose. Con el papel al 72% que había
+          // antes, el trazo quedaba en un 15% real y la tira parecía vacía en
+          // cuanto se hacía algo de zoom — que es justo cuando sirve para algo.
+          ctx.fillStyle = "rgba(242,241,236,0.45)";
+          ctx.fillRect(left, top, a - left, h);
+          ctx.fillRect(b, top, left + w - b, h);
+          ctx.fillStyle = "rgba(0,224,168,0.28)";
+          ctx.fillRect(a, top, b - a, h);
 
           ctx.translate(0.5, 0.5);
           ctx.strokeStyle = INK;
           ctx.lineWidth = 2 * ratio;
-          ctx.strokeRect(x0, top, Math.max(x1 - x0, ratio), h);
+          ctx.strokeRect(a, top, b - a, h);
           ctx.strokeRect(left, top, w, h);
           ctx.restore();
         },
@@ -348,7 +394,10 @@ export const chartCss = `
 .wa-chart .u-cursor-x { border-right: 1px dashed ${INK}; }
 .wa-chart .u-select { background: rgba(0,224,168,0.25); border: 2px solid ${INK}; }
 .wa-chart .u-cursor-pt { display: none; }
-.wa-nav canvas { cursor: pointer; }
+/* El cursor real lo pone el ratón según dónde caiga (mover, estirar, saltar);
+   esto es sólo el de partida. touch-action: sin él, arrastrar la ventana con el
+   dedo hace scroll de la página en vez de mover nada. */
+.wa-nav .u-over { cursor: pointer; touch-action: none; }
 `;
 
 export const TIP_BG = PAPER;

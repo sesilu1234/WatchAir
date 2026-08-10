@@ -44,7 +44,11 @@ export default function RecordingsPage() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [recordings, setRecordings] = useState<Recording[]>([]);
+  // null = todavía no ha contestado el primer fetch. No es lo mismo que una
+  // lista vacía, y hasta ahora se enseñaban igual: "no hay grabaciones" mientras
+  // cargaba, y para siempre si la llamada fallaba.
+  const [recordings, setRecordings] = useState<Recording[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [filterDeviceUuid, setFilterDeviceUuid] = useState("");
   const [filterDate, setFilterDate] = useState("");
@@ -63,8 +67,14 @@ export default function RecordingsPage() {
 
   const refresh = useCallback(() => {
     listRecordings()
-      .then(setRecordings)
-      .catch((err) => console.error(err));
+      .then((rows) => {
+        setRecordings(rows);
+        setListError(null);
+      })
+      .catch((err) => {
+        console.error(err);
+        setListError(err instanceof Error ? err.message : String(err));
+      });
     listDevices()
       .then(setDevices)
       .catch((err) => console.error(err));
@@ -138,7 +148,7 @@ export default function RecordingsPage() {
   };
 
   const byDevice = useMemo(
-    () => recordings.filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid),
+    () => (recordings ?? []).filter((r) => !filterDeviceUuid || r.device_uuid === filterDeviceUuid),
     [recordings, filterDeviceUuid],
   );
 
@@ -241,7 +251,9 @@ export default function RecordingsPage() {
               <span style={styles.listCountPill}>
                 {selecting
                   ? `${selection.size} seleccionadas`
-                  : `${history.length} grabaciones`}
+                  : recordings == null
+                    ? "Cargando…"
+                    : `${history.length} grabaciones`}
               </span>
               {selecting ? (
                 <>
@@ -286,7 +298,22 @@ export default function RecordingsPage() {
             <span style={styles.tableHeadCellRight}>Duración</span>
           </div>
           <div style={{ ...styles.rows, ...(compact ? mobile.rows : null) }}>
-            {history.length === 0 ? (
+            {recordings == null ? (
+              // Sin datos todavía: si el fetch falló se dice, y si sigue en
+              // camino se enseñan filas fantasma. Un fallo de red que se refresca
+              // más tarde no borra la lista que ya hubiera: por eso esto sólo
+              // mira `recordings`, no `listError` a secas.
+              listError != null ? (
+                <div style={styles.empty}>
+                  <span style={styles.emptyIcon}>
+                    <WaveIcon />
+                  </span>
+                  No se pudo cargar el historial · {listError}
+                </div>
+              ) : (
+                <LoadingRows />
+              )
+            ) : history.length === 0 ? (
               <div style={styles.empty}>
                 <span style={styles.emptyIcon}>
                   <WaveIcon />
@@ -331,6 +358,42 @@ export default function RecordingsPage() {
     </main>
   );
 }
+
+// --- Filas fantasma mientras carga ---
+//
+// Tres filas con la misma forma que las de verdad, no una línea de texto: al
+// llegar los datos la lista no da el salto de layout, y de un vistazo ya se ve
+// que lo que va a aparecer ahí es una lista.
+function LoadingRows() {
+  return (
+    <>
+      <style>{skeletonCss}</style>
+      {[0, 1, 2].map((i) => {
+        // El desfase entre filas es lo que hace que se lea como "cargando" y no
+        // como tres cajas grises parpadeando a la vez.
+        const block = (extra: CSSProperties): CSSProperties => ({
+          ...styles.skeletonBlock,
+          ...extra,
+          animationDelay: `${i * 0.12}s`,
+        });
+        return (
+          <div key={i} style={styles.skeletonRow} aria-hidden>
+            <span style={block({ width: 26, height: 26, flexShrink: 0 })} />
+            <div style={styles.skeletonLines}>
+              <span style={block({ width: `${52 - i * 8}%`, height: 11 })} />
+              <span style={block({ width: `${34 - i * 5}%`, height: 9 })} />
+            </div>
+            <span style={block({ width: 56, height: 18, borderRadius: 999, flexShrink: 0 })} />
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+const skeletonCss = `
+@keyframes wa-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+`;
 
 // --- Panel superior: idle ---
 
@@ -1169,6 +1232,22 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 999,
     padding: "3px 10px",
     flexShrink: 0,
+  },
+
+  // Misma caja que `row`, sin nada que dependa del ratón: no hay adónde ir.
+  skeletonRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "13px 6px 13px 4px",
+    borderBottom: "1px solid rgba(17,17,17,0.08)",
+    borderLeft: "2px solid transparent",
+  },
+  skeletonLines: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 },
+  skeletonBlock: {
+    display: "block",
+    background: "rgba(17,17,17,0.1)",
+    animation: "wa-pulse 1.2s ease-in-out infinite",
   },
 
   // --- Selección, renombrado y borrado ---

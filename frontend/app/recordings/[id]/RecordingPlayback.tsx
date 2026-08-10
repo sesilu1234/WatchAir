@@ -23,7 +23,9 @@ import {
   formatVisible,
   mainOpts,
   navOpts,
+  peakAmplitude,
   rangeIndex,
+  NAV_EDGE_GRAB,
   toSignal,
   tooltipTime,
   Y_RANGES,
@@ -631,7 +633,6 @@ function PressureChart({
   const tipValueRef = useRef<HTMLSpanElement>(null);
   const tipTimeRef = useRef<HTMLSpanElement>(null);
   const chartRef = useRef<uPlot | null>(null);
-  const navPlotRef = useRef<uPlot | null>(null);
 
   // uplot se monta una vez y sus opciones se construyen una vez. Lo que puede
   // cambiar después —la escala Y, los rótulos del eje X, el tramo visible— lo
@@ -726,12 +727,13 @@ function PressureChart({
         navOpts({
           width: Math.max(navHost.clientWidth, 1),
           height: NAV_HEIGHT,
-          read: () => ({ range: rangeRef.current, window: windowRef.current }),
+          span: { from: firstT, to: lastT },
+          peak: peakAmplitude(signal),
+          read: () => windowRef.current,
         }),
         data,
         navHost,
       );
-      navPlotRef.current = nav;
 
       // La rueda hace zoom alrededor del puntero, que es lo que se espera: el
       // instante que tienes debajo del ratón se queda donde está.
@@ -749,26 +751,108 @@ function PressureChart({
       };
       chart.over.addEventListener("wheel", onWheel, { passive: false });
 
-      // En la tira, pinchar o arrastrar lleva la ventana a ese punto sin cambiar
-      // el zoom. Es la forma rápida de cruzar una grabación de nueve horas.
-      let dragging = false;
-      const jump = (clientX: number) => {
-        if (chart == null || nav == null) return;
-        const rect = nav.over.getBoundingClientRect();
-        const at = firstT + ((clientX - rect.left) / rect.width) * (lastT - firstT);
-        const { from, to } = windowRef.current;
-        const half = (to - from) / 2;
-        const next = clampWindow(at - half, at + half, firstT, lastT);
-        chart.setScale("x", { min: next.from, max: next.to });
+      // La tira se maneja como el scroll de un mapa: la caja resaltada se coge y
+      // se arrastra, sus bordes se estiran para abrir o cerrar la ventana, y
+      // pinchar en la silueta salta ahí. Todo con pointer events, así que el
+      // dedo hace exactamente lo mismo que el ratón.
+      //
+      // El arrastre trabaja en segundos, no en píxeles: sólo el reparto de zonas
+      // mira la pantalla, que es donde se decide qué has apuntado.
+      type NavDrag = { mode: "move"; grab: number } | { mode: "from" | "to" } | null;
+      let drag: NavDrag = null;
+
+      const navRect = () => nav?.over.getBoundingClientRect();
+      const valueAt = (clientX: number) => {
+        const rect = navRect();
+        if (rect == null || rect.width === 0) return firstT;
+        return firstT + ((clientX - rect.left) / rect.width) * (lastT - firstT);
       };
+      const pxOf = (value: number) => {
+        const rect = navRect();
+        if (rect == null) return 0;
+        const span = lastT - firstT || 1;
+        return rect.left + ((value - firstT) / span) * rect.width;
+      };
+
+      const zoneAt = (clientX: number) => {
+        const x0 = pxOf(windowRef.current.from);
+        const x1 = pxOf(windowRef.current.to);
+        // Con la ventana muy cerrada los dos bordes se tocan y no hay forma de
+        // apuntar a uno solo: entonces todo el manchón es "mover".
+        if (x1 - x0 >= NAV_EDGE_GRAB * 3) {
+          if (Math.abs(clientX - x0) <= NAV_EDGE_GRAB) return "from" as const;
+          if (Math.abs(clientX - x1) <= NAV_EDGE_GRAB) return "to" as const;
+        }
+        return clientX >= x0 - NAV_EDGE_GRAB && clientX <= x1 + NAV_EDGE_GRAB
+          ? ("move" as const)
+          : ("outside" as const);
+      };
+
+      const showCursor = (clientX: number) => {
+        const over = nav?.over;
+        if (over == null) return;
+        if (drag != null) {
+          over.style.cursor = drag.mode === "move" ? "grabbing" : "ew-resize";
+          return;
+        }
+        const zone = zoneAt(clientX);
+        over.style.cursor =
+          zone === "move" ? "grab" : zone === "outside" ? "pointer" : "ew-resize";
+      };
+
+      const slide = (from: number, to: number) => {
+        const next = clampWindow(from, to, firstT, lastT);
+        chart?.setScale("x", { min: next.from, max: next.to });
+      };
+
       const onNavDown = (event: PointerEvent) => {
-        dragging = true;
-        nav?.over.setPointerCapture(event.pointerId);
-        jump(event.clientX);
+        if (chart == null || nav == null) return;
+        nav.over.setPointerCapture(event.pointerId);
+        const zone = zoneAt(event.clientX);
+        const at = valueAt(event.clientX);
+        const { from, to } = windowRef.current;
+
+        if (zone === "outside") {
+          // Pinchar fuera lleva la ventana ahí y la deja cogida por el centro:
+          // se puede seguir arrastrando sin levantar el dedo.
+          const half = (to - from) / 2;
+          slide(at - half, at + half);
+          drag = { mode: "move", grab: 0.5 };
+        } else if (zone === "move") {
+          // Se recuerda por dónde se cogió, en fracción del ancho: así la caja
+          // no pega un salto para centrarse bajo el puntero.
+          drag = { mode: "move", grab: (at - from) / (to - from || 1) };
+        } else {
+          drag = { mode: zone };
+        }
+        showCursor(event.clientX);
       };
-      const onNavMove = (event: PointerEvent) => dragging && jump(event.clientX);
-      const onNavUp = () => {
-        dragging = false;
+
+      const onNavMove = (event: PointerEvent) => {
+        if (drag == null) {
+          showCursor(event.clientX);
+          return;
+        }
+        const at = valueAt(event.clientX);
+        const { from, to } = windowRef.current;
+
+        if (drag.mode === "move") {
+          const width = to - from;
+          slide(at - width * drag.grab, at + width * (1 - drag.grab));
+        } else if (drag.mode === "from") {
+          // Estirar no conserva el ancho, así que no pasa por clampWindow: se
+          // topa cada borde contra el suyo y se respeta el zoom máximo.
+          const next = Math.min(Math.max(at, firstT), Math.max(firstT, to - MIN_WINDOW));
+          chart?.setScale("x", { min: next, max: to });
+        } else {
+          const next = Math.max(Math.min(at, lastT), Math.min(lastT, from + MIN_WINDOW));
+          chart?.setScale("x", { min: from, max: next });
+        }
+      };
+
+      const onNavUp = (event: PointerEvent) => {
+        drag = null;
+        showCursor(event.clientX);
       };
       nav.over.addEventListener("pointerdown", onNavDown);
       nav.over.addEventListener("pointermove", onNavMove);
@@ -800,7 +884,6 @@ function PressureChart({
     return () => {
       disposed = true;
       chartRef.current = null;
-      navPlotRef.current = null;
       if (readout != null) clearTimeout(readout);
       cleanupExtras?.();
       observer?.disconnect();
@@ -810,11 +893,12 @@ function PressureChart({
   }, [signal, onWindow, compact]);
 
   // Cambiar la escala del eje Y no toca los datos ni el zoom del eje X: se fija
-  // la escala nueva y se repinta.
+  // la escala nueva y se repinta. La tira de abajo no se toca: tiene la suya,
+  // la de la grabación entera, y es lo que la mantiene legible con cualquier
+  // zoom de aquí arriba.
   useEffect(() => {
     rangeRef.current = range;
     chartRef.current?.setScale("y", { min: -range, max: range });
-    navPlotRef.current?.setScale("y", { min: -range, max: range });
   }, [range]);
 
   // Pasar de duración a hora real es reescribir rótulos: mismos datos, mismo
