@@ -47,6 +47,7 @@ antes de hacer publico o algo, rotar TODO
 ---
 
 
+la intensidad de la presion o max/min y average llegados depende de como se haya puesto "de bien" la canula el usuario
 
 
 

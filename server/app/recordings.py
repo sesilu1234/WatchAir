@@ -167,6 +167,25 @@ HEADER_VERSION = 3
 class BadRecording(ValueError):
     """Cabecera ilegible: reintentarlo no va a arreglarlo."""
 
+    # La ESP32 puede borrar su copia. Lo que hace ilegible a este fichero está
+    # en sus propios bytes, asi que mandarlo otra vez daria exactamente el mismo
+    # resultado — y mientras tanto se queda en la cabeza de la cola tapando a
+    # las grabaciones buenas que vienen detras.
+    discard = True
+
+
+class UnsupportedVersion(BadRecording):
+    """Cabecera de una version que este server todavia no sabe leer.
+
+    Esta NO se descarta, y es la unica excepcion: el fichero puede estar
+    perfecto y ser el server el que va por detras (un rollback, o un firmware
+    mas nuevo). Un despliegue posterior puede aprender a leerlo, asi que la
+    ESP32 se lo queda. Borrarlo aqui seria destruir datos buenos por un
+    desajuste de despliegue.
+    """
+
+    discard = False
+
 
 def _parse(data: bytes) -> tuple[str, datetime, datetime, int, bytes]:
     """Cabecera + cuerpo alineado. Devuelve (uuid, inicio, fin, duración, bytes).
@@ -180,7 +199,7 @@ def _parse(data: bytes) -> tuple[str, datetime, datetime, int, bytes]:
         raise BadRecording("cabecera inválida")
     version = data[4]
     if version != HEADER_VERSION:
-        raise BadRecording(f"versión de cabecera no soportada: {version}")
+        raise UnsupportedVersion(f"versión de cabecera no soportada: {version}")
 
     file_uuid = str(uuid_lib.UUID(bytes=data[5:21]))
     started_epoch_ms = int.from_bytes(data[22:30], "little")

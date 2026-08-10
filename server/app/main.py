@@ -153,8 +153,11 @@ def _device_authorized(uuid: str, secret: str) -> bool:
 
 @app.post("/device/upload")
 async def device_upload(uuid: str, secret: str, recording: str, request: Request):
-    """La ESP32 sube el .bin entero. Un 200 es su permiso para borrarlo de la SD,
-    asi que cualquier fallo aqui tiene que salir como error: reintentara sola."""
+    """La ESP32 sube el .bin entero.
+
+    Dos respuestas la autorizan a borrarlo de su SD, y solo dos: un 200 (esta
+    guardado) y un 422 (no vale y no valdra nunca). Cualquier otra cosa tiene
+    que salir como error para que se lo quede y reintente."""
     if not _device_authorized(uuid, secret):
         raise HTTPException(status_code=403, detail="Credenciales de dispositivo inválidas")
 
@@ -178,17 +181,29 @@ async def device_upload(uuid: str, secret: str, recording: str, request: Request
                 raise HTTPException(status_code=413, detail="Grabación demasiado grande")
             await recordings.on_upload_progress(dev, len(data), total)
         if not data:
-            raise HTTPException(status_code=400, detail="Cuerpo vacío")
+            # Cero bytes no se arregla reintentando: mismo trato que una cabecera
+            # ilegible. La ESP32 ya filtra los ficheros que solo tienen cabecera,
+            # asi que llegar aqui significa que ese .bin no tiene nada dentro.
+            raise HTTPException(status_code=422, detail="Cuerpo vacío")
 
         try:
             # El 100% se queda puesto mientras esto persiste en Supabase: los
             # bytes ya han llegado, pero la subida no ha terminado hasta el 200.
             await recordings.complete_upload(uuid, recording, bytes(data))
         except recordings.BadRecording as exc:
-            # Reintentar no lo va a arreglar, pero tampoco se borra nada: el
-            # fichero se queda en la SD por si se puede rescatar a mano.
-            log.error("Upload %s: fichero ilegible (%s)", recording, exc)
-            raise HTTPException(status_code=400, detail=f"{exc}"[:200]) from exc
+            # Dos formas distintas de decir que no:
+            #
+            #   422 — este fichero no vale y no va a valer nunca. Es el permiso
+            #         para que la ESP32 lo borre de su SD. Se elige un codigo que
+            #         no genera nadie mas por su cuenta (un proxy suelta 400, 413
+            #         o 502, nunca esto): asi el borrado solo puede ordenarlo esta
+            #         linea, y no un intermediario que ni ha visto el fichero.
+            #   409 — no se puede ahora, pero quiza mas adelante si (una version
+            #         de cabecera que este server aun no entiende). Se queda en la
+            #         SD y se sigue reintentando.
+            status = 422 if exc.discard else 409
+            log.error("Upload %s: rechazada con %d (%s)", recording, status, exc)
+            raise HTTPException(status_code=status, detail=f"{exc}"[:200]) from exc
         except Exception as exc:
             log.exception("Upload %s: no se pudo persistir", recording)
             raise HTTPException(status_code=503, detail=f"{exc}"[:200]) from exc

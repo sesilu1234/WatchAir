@@ -34,6 +34,11 @@ const unsigned long WIFI_CHECK_INTERVAL = 10000;
 const unsigned long WIFI_CONNECT_TIMEOUT = 15000;
 const unsigned long STATUS_INTERVAL_MS = 2000;
 const unsigned long UPLOAD_RETRY_MS = 5000;  // no reintentar en bucle una subida que falla
+// Techo al que se va espaciando el reintento mientras la subida siga fallando.
+// Sin esto, un fallo que no se arregla solo (server caído, Storage KO) reenvía
+// el fichero entero cada 5 s indefinidamente: son megabytes por el uplink en
+// bucle, y el live view se queda sin sitio y da tirones de segundos.
+const unsigned long UPLOAD_RETRY_MAX_MS = 60000;
 
 // Módulo microSD por SPI (VSPI por defecto de un devkit ESP32: SCK=18,
 // MISO=19, MOSI=23 — SD.begin() los usa solo con pasar el CS).
@@ -134,6 +139,7 @@ static void samplerTask(void*) {
 // ===================================================
 static void sdTask(void*) {
   uint32_t lastUploadAttempt = 0;
+  unsigned long uploadRetryMs = UPLOAD_RETRY_MS;  // se dobla mientras falle
   bool resumeChecked = false;
 
   for (;;) {
@@ -174,9 +180,22 @@ static void sdTask(void*) {
       continue;  // vaciar la cola antes de plantearse subir nada
     }
 
-    if (resumeChecked && !recordingActive && millis() - lastUploadAttempt >= UPLOAD_RETRY_MS) {
+    if (resumeChecked && !recordingActive && millis() - lastUploadAttempt >= uploadRetryMs) {
       lastUploadAttempt = millis();
-      uploadNextPending();  // bloquea lo que haga falta; aquí no molesta a nadie
+      // Bloquea lo que haga falta: a esta tarea nadie le espera. Lo que sí se
+      // resiente de una subida en curso es el WiFi, que lo comparte con el live
+      // view, y de ahí que un fallo repetido tenga que ir espaciándose.
+      switch (uploadNextPending()) {
+        case UploadResult::Progress:
+          uploadRetryMs = UPLOAD_RETRY_MS;  // la cola avanza: al ritmo normal
+          break;
+        case UploadResult::Failed:
+          uploadRetryMs *= 2;
+          if (uploadRetryMs > UPLOAD_RETRY_MAX_MS) uploadRetryMs = UPLOAD_RETRY_MAX_MS;
+          break;
+        case UploadResult::Idle:
+          break;  // no se intentó nada, así que el ritmo no dice nada todavía
+      }
     }
   }
 }
@@ -306,6 +325,19 @@ void setup() {
   // WiFi
   Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
   WiFi.mode(WIFI_STA);
+  // Sin ahorro de energía en la radio. Por defecto el ESP32 arranca en
+  // WIFI_PS_MIN_MODEM: se duerme entre balizas del router y solo despierta cada
+  // DTIM, del orden de 100-300 ms. Para el live view eso es justo lo que no
+  // interesa — las muestras salen a 25 Hz (una cada 40 ms) y con la radio
+  // dormitando llegan a golpes en vez de en fila.
+  //
+  // Se paga en consumo: la radio deja de dormir y son unas decenas de mA más.
+  // Si esto acaba yendo con batería, este es el primer sitio donde mirar.
+  //
+  // Va aquí, después de mode(WIFI_STA) y antes de begin(): el core reaplica el
+  // ajuste en cada STA_START, así que aguanta las reconexiones del watchdog de
+  // abajo por su cuenta y no hay que repetirlo allí.
+  WiFi.setSleep(false);
   WiFi.persistent(false);  // no reescribir credenciales en flash
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
